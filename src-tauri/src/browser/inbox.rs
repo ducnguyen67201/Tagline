@@ -246,4 +246,24 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn linkedin_placeholder_thread_urls_fall_back_to_the_inbox() {
+        let item = normalize_item(
+            RawItem {
+                remote_id: "fallback:linkedin:ross mcintyre".to_owned(),
+                display_name: "Ross McIntyre".to_owned(),
+                preview: "Status is reachable".to_owned(),
+                unread: false,
+                remote_url:
+                    "https://www.linkedin.com/messaging/thread/2-mailbox/undefined/".to_owned(),
+                timestamp: None,
+                direction: BrowserInboxDirection::Inbound,
+            },
+            Platform::Linkedin,
+        )
+        .expect("the row remains useful without a false deep link");
+
+        assert_eq!(item.remote_url, "https://www.linkedin.com/messaging/");
+    }
 }

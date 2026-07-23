@@ -12,7 +12,11 @@ import {
   prepareBrowserReplyInputSchema,
 } from "./browser"
 import { historyPreviewSchema } from "./history"
-import { conversationSchema, emailNotificationSyncResultSchema } from "./inbox"
+import {
+  browserInboxScanResultSchema,
+  conversationSchema,
+  emailNotificationSyncResultSchema,
+} from "./inbox"
 import {
   growthLoopOverviewSchema,
   proposeGrowthActionInputSchema,
@@ -111,6 +115,21 @@ describe("boundary schemas", () => {
         lastCheckedAt: "2026-07-23T18:00:00Z",
       }).success,
     ).toBe(false)
+  })
+
+  it("accepts an honest partial browser inbox scan result", () => {
+    expect(
+      browserInboxScanResultSchema.parse({
+        platform: "linkedin",
+        status: "partial",
+        scanned: 500,
+        imported: 480,
+        updated: 20,
+        lastScannedAt: "2026-07-23T19:05:00Z",
+        message: "LinkedIn stopped loading older rows. Scan again to continue.",
+        targetUrl: "https://www.linkedin.com/messaging/",
+      }).status,
+    ).toBe("partial")
   })
 
   it("rejects unknown fields on browser research inputs", () => {

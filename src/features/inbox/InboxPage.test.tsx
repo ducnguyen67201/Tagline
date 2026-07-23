@@ -165,14 +165,39 @@ describe("InboxPage email notifications", () => {
     expect(screen.getByText("u/founder")).toBeInTheDocument()
     expect(screen.getByText("Mina")).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByLabelText("Filter conversations"), "new")
+    await user.click(screen.getByRole("button", { name: /New 2/ }))
     expect(screen.getByText("Ari")).toBeInTheDocument()
     expect(screen.getByText("Mina")).toBeInTheDocument()
     expect(screen.queryByText("u/founder")).not.toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: "Check Apple Mail" }))
-    expect(await screen.findByText("2 new")).toBeInTheDocument()
+    expect((await screen.findAllByText("2 new")).length).toBeGreaterThan(0)
     expect(screen.getByText("1 X · 0 Reddit · 1 LinkedIn")).toBeInTheDocument()
+  })
+
+  it("searches locally across names, previews, and platforms with composable filters", async () => {
+    const user = userEvent.setup()
+    renderInbox()
+
+    const search = screen.getByRole("searchbox", { name: "Search conversations" })
+    await screen.findByText("Ari")
+
+    await user.type(search, "compare notes")
+    expect(screen.getByText("u/founder")).toBeInTheDocument()
+    expect(screen.queryByText("Ari")).not.toBeInTheDocument()
+
+    await user.clear(search)
+    await user.type(search, "linkedin")
+    expect(screen.getByText("Mina")).toBeInTheDocument()
+    expect(screen.queryByText("u/founder")).not.toBeInTheDocument()
+
+    await user.clear(search)
+    await user.click(screen.getByRole("button", { name: /Reddit 1/ }))
+    await user.click(screen.getByRole("button", { name: /New 2/ }))
+    expect(screen.getByText("No conversations found")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /New 2/ }))
+    expect(screen.getByText("u/founder")).toBeInTheDocument()
   })
 
   it("marks a signal read and keeps sending on the platform", async () => {
@@ -252,5 +277,25 @@ describe("InboxPage email notifications", () => {
         expect.anything(),
       )
     }
+  })
+
+  it("shows imported counts when a history scan is partial", async () => {
+    const user = userEvent.setup()
+    mocks.invokeValidated.mockResolvedValueOnce({
+      platform: "linkedin",
+      status: "partial",
+      scanned: 500,
+      imported: 480,
+      updated: 20,
+      lastScannedAt: "2026-07-23T19:05:00Z",
+      message: "LinkedIn stopped loading older rows. Scan again to continue.",
+      targetUrl: "https://www.linkedin.com/messaging/",
+    })
+    renderInbox()
+
+    await user.click(screen.getByRole("button", { name: "Scan LinkedIn inbox" }))
+
+    expect(await screen.findByText("500 conversations · 480 new · 20 updated")).toBeInTheDocument()
+    expect(screen.getByText("LinkedIn stopped loading older rows. Scan again to continue.")).toBeInTheDocument()
   })
 })

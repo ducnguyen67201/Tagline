@@ -118,4 +118,36 @@ describe("browser inbox extraction script", () => {
       }),
     )
   })
+
+  it("rejects LinkedIn placeholder thread URLs and uses stable per-person identities", () => {
+    document.body.innerHTML = `
+      <main>
+        <li id="ember47" class="msg-conversation-listitem">
+          <a href="https://www.linkedin.com/messaging/thread/2-mailbox/undefined/">
+            <strong>Ross McIntyre</strong><span>Status is reachable</span>
+          </a>
+        </li>
+        <li id="ember55" class="msg-conversation-listitem">
+          <a href="https://www.linkedin.com/messaging/thread/2-mailbox/undefined/">
+            <strong>Sashank Tadepalli</strong><span>Status is reachable</span>
+          </a>
+        </li>
+      </main>
+    `
+    setInnerText("#ember47", "Ross McIntyre\nStatus is reachable\nNow")
+    setInnerText("#ember55", "Sashank Tadepalli\nStatus is reachable\nNow")
+
+    const result = scan("linkedin", "/messaging/")
+
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        remoteId: "fallback:linkedin:ross mcintyre",
+        remoteUrl: "https://www.linkedin.com/messaging/",
+      }),
+      expect.objectContaining({
+        remoteId: "fallback:linkedin:sashank tadepalli",
+        remoteUrl: "https://www.linkedin.com/messaging/",
+      }),
+    ])
+  })
 })

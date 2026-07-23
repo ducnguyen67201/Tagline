@@ -531,6 +531,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linkedin_rescan_repairs_legacy_placeholder_rows_without_duplication() {
+        let database = Database::in_memory().await.expect("database");
+        let service = BrowserInboxService::new(BrowserManager::default(), database.pool().clone());
+        service
+            .ingest(
+                Platform::Linkedin,
+                BrowserInboxPageScan {
+                    state: BrowserInboxPageState::Ready,
+                    items: vec![BrowserInboxItem {
+                        remote_id: "ember47".to_owned(),
+                        display_name: "Ross McIntyre".to_owned(),
+                        preview: "Status is reachable".to_owned(),
+                        unread: false,
+                        remote_url:
+                            "https://www.linkedin.com/messaging/thread/2-mailbox/undefined/"
+                                .to_owned(),
+                        timestamp: None,
+                        direction: BrowserInboxDirection::Inbound,
+                    }],
+                },
+            )
+            .await
+            .expect("legacy scan");
+
+        let repaired = service
+            .ingest(
+                Platform::Linkedin,
+                BrowserInboxPageScan {
+                    state: BrowserInboxPageState::Ready,
+                    items: vec![BrowserInboxItem {
+                        remote_id: "fallback:linkedin:ross mcintyre".to_owned(),
+                        display_name: "Ross McIntyre".to_owned(),
+                        preview: "A newer preview".to_owned(),
+                        unread: true,
+                        remote_url: "https://www.linkedin.com/messaging/".to_owned(),
+                        timestamp: None,
+                        direction: BrowserInboxDirection::Inbound,
+                    }],
+                },
+            )
+            .await
+            .expect("repair scan");
+
+        assert_eq!((repaired.imported, repaired.updated), (0, 1));
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM browser_inbox_ingestions WHERE platform = ?")
+                .bind("linkedin")
+                .fetch_one(database.pool())
+                .await
+                .expect("ingestion count");
+        assert_eq!(rows, 1);
+        let stored: (String, String) = sqlx::query_as(
+            "SELECT remote_id, remote_url FROM browser_inbox_ingestions WHERE platform = ?",
+        )
+        .bind("linkedin")
+        .fetch_one(database.pool())
+        .await
+        .expect("repaired ingestion");
+        assert_eq!(
+            stored,
+            (
+                "fallback:linkedin:ross mcintyre".to_owned(),
+                "https://www.linkedin.com/messaging/".to_owned()
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn browser_scan_approvals_cannot_send_through_platform_adapters() {
         let state = AppState::for_tests().await.expect("state");
         let service =

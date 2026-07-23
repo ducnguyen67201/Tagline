@@ -258,6 +258,7 @@ describe("InboxPage email notifications", () => {
     renderInbox()
 
     await screen.findByText("Ari")
+    await user.click(screen.getByText("Scan inbox"))
     await user.click(screen.getByRole("button", { name: "Scan X inbox" }))
     expect(await screen.findByText("5 conversations · 5 new · 0 updated")).toBeInTheDocument()
 
@@ -296,6 +297,8 @@ describe("InboxPage email notifications", () => {
     await user.click(screen.getByRole("button", { name: "Scan LinkedIn inbox" }))
 
     expect(await screen.findByText("500 conversations · 480 new · 20 updated")).toBeInTheDocument()
-    expect(screen.getByText("LinkedIn stopped loading older rows. Scan again to continue.")).toBeInTheDocument()
+    expect(
+      screen.getByText("LinkedIn stopped loading older rows. Scan again to continue."),
+    ).toBeInTheDocument()
   })
 })

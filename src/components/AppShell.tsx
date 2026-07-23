@@ -17,10 +17,10 @@ const navigation = [
 
 export function AppShell() {
   const location = useLocation()
-  const browserRoute = location.pathname === "/browser"
+  const viewportRoute = location.pathname === "/browser" || location.pathname === "/inbox"
 
   return (
-    <div className={cn("app-frame", browserRoute && "app-frame-browser")}>
+    <div className={cn("app-frame", viewportRoute && "app-frame-viewport")}>
       <WorkbenchTitlebar />
       <aside className="sidebar">
         <NavLink className="brand" to="/" aria-label="Goalbar home">

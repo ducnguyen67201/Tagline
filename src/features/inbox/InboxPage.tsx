@@ -1,10 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowUpRight, Check, Copy, Inbox, MailCheck, RefreshCw, Send, Sparkles } from "lucide-react"
+import {
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  Inbox,
+  MailCheck,
+  RefreshCw,
+  Search,
+  Send,
+  Sparkles,
+} from "lucide-react"
 import { useMemo, useState } from "react"
 import { z } from "zod"
 
-import { CapabilityBadge } from "@/components/CapabilityBadge"
-import { EmptyState } from "@/components/EmptyState"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -36,7 +46,13 @@ const sendInputSchema = approveInputSchema.extend({
 })
 const conversationInputSchema = z.object({ conversationId: z.string().uuid() })
 const openUrlSchema = z.url()
-type InboxFilter = "all" | "new" | Conversation["platform"]
+type PlatformFilter = "all" | Conversation["platform"]
+const inboxFilters: Array<{ value: PlatformFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "x", label: "X" },
+  { value: "reddit", label: "Reddit" },
+  { value: "linkedin", label: "LinkedIn" },
+]
 
 export function InboxPage() {
   const queryClient = useQueryClient()
@@ -44,7 +60,10 @@ export function InboxPage() {
   const [body, setBody] = useState("")
   const [recipientId, setRecipientId] = useState("")
   const [approvalId, setApprovalId] = useState<string | null>(null)
-  const [filter, setFilter] = useState<InboxFilter>("all")
+  const [filter, setFilter] = useState<PlatformFilter>("all")
+  const [unreadOnly, setUnreadOnly] = useState(false)
+  const [search, setSearch] = useState("")
+  const [composerOpen, setComposerOpen] = useState(true)
   const [copied, setCopied] = useState(false)
   const conversations = useQuery({
     queryKey: queryKeys.conversations,
@@ -170,17 +189,46 @@ export function InboxPage() {
 
   const newCount = conversations.data?.filter((conversation) => conversation.unreadCount > 0).length ?? 0
   const visibleConversations = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase()
     const rows = conversations.data ?? []
-    if (filter === "new") return rows.filter((conversation) => conversation.unreadCount > 0)
-    if (filter === "all") return rows
-    return rows.filter((conversation) => conversation.platform === filter)
-  }, [conversations.data, filter])
+    const filteredRows = rows.filter(
+      (conversation) =>
+        (filter === "all" || conversation.platform === filter) &&
+        (!unreadOnly || conversation.unreadCount > 0),
+    )
+
+    if (!normalizedSearch) return filteredRows
+    return filteredRows.filter((conversation) =>
+      [
+        conversation.displayName,
+        conversation.preview,
+        conversation.platform,
+        conversation.kind,
+        conversation.contentState,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedSearch),
+    )
+  }, [conversations.data, filter, search, unreadOnly])
+
+  const platformCounts = useMemo(() => {
+    const rows = conversations.data ?? []
+    return rows.reduce(
+      (counts, conversation) => ({
+        ...counts,
+        [conversation.platform]: counts[conversation.platform] + 1,
+      }),
+      { all: rows.length, x: 0, reddit: 0, linkedin: 0 },
+    )
+  }, [conversations.data])
 
   const selectConversation = (conversation: Conversation) => {
     setSelected({ ...conversation, unreadCount: 0 })
     setBody("")
     setApprovalId(null)
     setCopied(false)
+    setComposerOpen(true)
     if (conversation.unreadCount > 0) markRead.mutate(conversation.id)
   }
   const localPreview = selected?.source !== "platform_api"
@@ -197,64 +245,105 @@ export function InboxPage() {
     copyApproved.error
 
   return (
-    <div className="page-stack">
-      <header className="page-header inbox-page-header">
-        <div>
-          <p className="eyebrow">Inbox · local browser signals, platform truth</p>
-          <h1>Conversations worth continuing.</h1>
+    <div className="inbox-workbench-page">
+      <header className="inbox-command-deck">
+        <div className="inbox-command-title">
+          <span className="inbox-command-mark" aria-hidden="true">
+            <Inbox size={16} />
+          </span>
+          <div>
+            <h1>Inbox</h1>
+            <p>Local signals · platform truth</p>
+          </div>
         </div>
+
+        <label className="inbox-search">
+          <Search size={15} aria-hidden="true" />
+          <span className="sr-only">Search conversations</span>
+          <Input
+            type="search"
+            aria-label="Search conversations"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search people, messages, or platforms"
+          />
+          {search && <kbd>{visibleConversations.length} found</kbd>}
+        </label>
+
         <div className="inbox-header-actions" aria-label="Inbox scan actions">
-          {(["x", "reddit", "linkedin"] as const).map((platform) => {
-            const name = platform === "x" ? "X" : platform === "reddit" ? "Reddit" : "LinkedIn"
-            const pending = browserScan.isPending && browserScan.variables === platform
-            return (
-              <Button
-                key={platform}
-                variant="secondary"
-                aria-label={`Scan ${name} inbox`}
-                onClick={() => browserScan.mutate(platform)}
-                disabled={browserScan.isPending}
-              >
-                <RefreshCw size={14} className={pending ? "spin" : undefined} />
-                {pending ? `Scanning ${name}…` : `Scan ${name}`}
-              </Button>
-            )
-          })}
+          <details className="inbox-scan-menu">
+            <summary aria-label="Choose an inbox to scan">
+              <RefreshCw size={13} className={browserScan.isPending ? "spin" : undefined} />
+              <span>{browserScan.isPending ? "Scanning…" : "Scan inbox"}</span>
+              <ChevronDown size={12} aria-hidden="true" />
+            </summary>
+            <div className="inbox-scan-popover">
+              <p>
+                <strong>Scan a signed-in tab</strong>
+                <span>Free · local · read-only</span>
+              </p>
+              {(["x", "reddit", "linkedin"] as const).map((platform) => {
+                const name = platform === "x" ? "X" : platform === "reddit" ? "Reddit" : "LinkedIn"
+                const pending = browserScan.isPending && browserScan.variables === platform
+                return (
+                  <button
+                    key={platform}
+                    type="button"
+                    aria-label={`Scan ${name} inbox`}
+                    onClick={() => browserScan.mutate(platform)}
+                    disabled={browserScan.isPending}
+                  >
+                    <span>{name}</span>
+                    <small>{pending ? "Scanning…" : `${platformCounts[platform]} saved`}</small>
+                    <RefreshCw size={12} className={pending ? "spin" : undefined} />
+                  </button>
+                )
+              })}
+            </div>
+          </details>
           <Button
             variant="ghost"
             aria-label="Check Apple Mail"
+            title="Check Apple Mail"
             onClick={() => sync.mutate()}
             disabled={sync.isPending}
           >
             {sync.isPending ? <RefreshCw size={14} className="spin" /> : <MailCheck size={14} />}
-            {sync.isPending ? "Checking mail…" : "Check mail"}
+            Mail
           </Button>
         </div>
       </header>
 
-      <div className="inbox-toolbar" aria-label="Inbox filters">
-        <label className="field inbox-filter">
-          <span>Show</span>
-          <select
-            className="input"
-            aria-label="Filter conversations"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value as InboxFilter)}
+      <div className="inbox-filter-deck" aria-label="Inbox controls">
+        <div className="inbox-filter-chips" aria-label="Filter conversations">
+          {inboxFilters.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className="inbox-filter-chip"
+              aria-pressed={filter === option.value}
+              onClick={() => setFilter(option.value)}
+            >
+              <span>{option.label}</span>
+              <strong>{platformCounts[option.value]}</strong>
+            </button>
+          ))}
+          <span className="inbox-filter-divider" aria-hidden="true" />
+          <button
+            type="button"
+            className="inbox-filter-chip inbox-filter-new"
+            aria-pressed={unreadOnly}
+            onClick={() => setUnreadOnly((value) => !value)}
           >
-            <option value="all">All conversations</option>
-            <option value="new">New ({newCount})</option>
-            <option value="x">X</option>
-            <option value="reddit">Reddit</option>
-            <option value="linkedin">LinkedIn</option>
-          </select>
-        </label>
-        <div className="inbox-source-note">
-          <strong>Free local connector</strong>
-          <span>
-            Scans recent conversation rows from signed-in Goalbar browser tabs. Full threads stay on each
-            platform.
-          </span>
+            <span className="unread-dot" aria-hidden="true" />
+            <span>New</span>
+            <strong>{newCount}</strong>
+          </button>
         </div>
+        <p className="inbox-source-note">
+          <strong>Free local connector</strong>
+          <span>Signed-in tabs stay on this machine</span>
+        </p>
         {browserScan.data && (
           <div className="inbox-sync-result" role="status">
             <strong>
@@ -276,175 +365,196 @@ export function InboxPage() {
         )}
       </div>
 
-      {!conversations.isPending && !visibleConversations.length ? (
-        <EmptyState
-          eyebrow={filter === "all" ? "Nothing waiting" : "No matching notifications"}
-          title={filter === "all" ? "Your attention inbox is quiet." : "Try another filter."}
-          body={
-            filter === "all"
-              ? "Open and sign in to a platform in Goalbar Browser, then run its inbox scan."
-              : "Goalbar only shows conversations that match the selected platform or new state."
-          }
-        />
-      ) : (
-        <div className="inbox-layout">
-          <div className="conversation-list">
-            {visibleConversations.map((conversation) => (
-              <button
-                className="conversation-row conversation-button"
-                data-unread={conversation.unreadCount > 0}
-                data-selected={selected?.id === conversation.id}
-                key={conversation.id}
-                onClick={() => selectConversation(conversation)}
-              >
-                <span className="avatar">
-                  <Inbox size={17} />
-                </span>
-                <div>
-                  <div className="conversation-meta">
-                    <strong>{conversation.displayName}</strong>
-                    <span>
-                      {titleCase(conversation.platform)} · {relativeDate(conversation.updatedAt)}
-                    </span>
-                  </div>
-                  <p>{conversation.preview}</p>
-                </div>
-                <div>
-                  {conversation.unreadCount > 0 && <span className="unread-dot" aria-label="New" />}
-                  {conversation.source === "email_notification" ? (
-                    <Badge tone="warn">Email excerpt</Badge>
-                  ) : conversation.source === "browser_scan" ? (
-                    <Badge tone="good">Browser preview</Badge>
-                  ) : (
-                    <CapabilityBadge state={conversation.replyCapability} />
-                  )}
-                </div>
-              </button>
-            ))}
+      <div className="inbox-layout">
+        <aside className="inbox-conversation-rail" aria-label="Conversation results">
+          <div className="inbox-rail-heading">
+            <div>
+              <span>Attention queue</span>
+              <strong>{visibleConversations.length}</strong>
+            </div>
+            <small>{newCount ? `${newCount} new` : "Up to date"}</small>
           </div>
-          <div className="inbox-detail-stack">
-            {selected?.remoteUrl && (
-              <InboxBrowserPane
-                conversation={selected}
-                onOpenExternally={(url) => openPlatform.mutate(url)}
-              />
-            )}
-            <section className="panel reply-panel">
-              {!selected ? (
-                <EmptyState
-                  eyebrow="Choose a notification"
-                  title="Open the real conversation here."
-                  body="Select a row to show its signed-in platform thread beside the inbox."
-                />
-              ) : (
-                <>
-                  <div className="panel-heading inbox-panel-heading">
-                    <span className="panel-icon">
-                      <Sparkles size={17} />
-                    </span>
-                    <div>
-                      <h2>Reply to {selected.displayName}</h2>
-                      <p>
-                        {titleCase(selected.platform)} · {titleCase(selected.kind)}
-                      </p>
+          <div className="conversation-list">
+            {!conversations.isPending && !visibleConversations.length ? (
+              <div className="inbox-empty-results">
+                <span className="inbox-empty-orbit" aria-hidden="true">
+                  <Search size={18} />
+                </span>
+                <strong>{platformCounts.all === 0 ? "Your inbox is quiet" : "No conversations found"}</strong>
+                <p>
+                  {platformCounts.all === 0
+                    ? "Sign in through Goalbar Browser, then scan a platform."
+                    : "Try a different name, phrase, platform, or unread state."}
+                </p>
+              </div>
+            ) : (
+              visibleConversations.map((conversation) => (
+                <button
+                  className="conversation-row conversation-button"
+                  data-unread={conversation.unreadCount > 0}
+                  data-selected={selected?.id === conversation.id}
+                  key={conversation.id}
+                  onClick={() => selectConversation(conversation)}
+                >
+                  <span className="avatar" aria-hidden="true">
+                    {conversation.displayName.slice(0, 1).toLocaleUpperCase()}
+                  </span>
+                  <div className="conversation-copy">
+                    <div className="conversation-meta">
+                      <strong>{conversation.displayName}</strong>
+                      <span>{relativeDate(conversation.updatedAt)}</span>
                     </div>
-                    {selected.remoteUrl && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label="Open on platform"
-                        onClick={() => openPlatform.mutate(selected.remoteUrl!)}
-                      >
-                        <ArrowUpRight size={16} />
-                      </Button>
-                    )}
+                    <p>{conversation.preview}</p>
+                    <span className="conversation-platform">{titleCase(conversation.platform)}</span>
                   </div>
-                  {selected.source === "email_notification" && (
-                    <div className="inbox-context-warning">
-                      <strong>
-                        {selected.contentState === "link_only" ? "Link-only notification" : "Email excerpt"}
-                      </strong>
-                      <span>
-                        Open the platform to verify the full conversation. Goalbar will not send
-                        automatically.
-                      </span>
+                  <div className="conversation-signals">
+                    {conversation.unreadCount > 0 && <span className="unread-dot" aria-label="New" />}
+                    {selected?.id === conversation.id && (
+                      <span className="conversation-live-label">Live</span>
+                    )}
+                    <ArrowUpRight size={14} aria-hidden="true" />
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </aside>
+
+        <div className="inbox-detail-stack">
+          {!selected ? (
+            <section className="inbox-thread-empty">
+              <div className="inbox-thread-empty-mark" aria-hidden="true">
+                <Sparkles size={24} />
+              </div>
+              <p className="eyebrow">Live workspace</p>
+              <h2>Choose a conversation</h2>
+              <p>Select someone from the queue to open their real, signed-in platform thread here.</p>
+              <Badge tone="good">Local session · no silent sends</Badge>
+            </section>
+          ) : (
+            <>
+              {selected.remoteUrl && (
+                <InboxBrowserPane
+                  conversation={selected}
+                  onOpenExternally={(url) => openPlatform.mutate(url)}
+                />
+              )}
+              <section className="reply-panel" data-collapsed={!composerOpen}>
+                <button
+                  type="button"
+                  className="inbox-composer-toggle"
+                  aria-expanded={composerOpen}
+                  onClick={() => setComposerOpen((value) => !value)}
+                >
+                  <span className="panel-icon">
+                    <Sparkles size={15} />
+                  </span>
+                  <span>
+                    <strong>Reply studio</strong>
+                    <small>Draft locally · approve exact text · finish on platform</small>
+                  </span>
+                  {composerOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                </button>
+                {composerOpen && (
+                  <div className="inbox-composer-body">
+                    <div className="inbox-composer-context">
+                      <div>
+                        <strong>Reply to {selected.displayName}</strong>
+                        <span>
+                          {titleCase(selected.platform)} · {titleCase(selected.kind)}
+                        </span>
+                      </div>
+                      {selected.remoteUrl && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label="Open on platform"
+                          onClick={() => openPlatform.mutate(selected.remoteUrl!)}
+                        >
+                          <ArrowUpRight size={16} />
+                        </Button>
+                      )}
                     </div>
-                  )}
-                  {selected.source === "browser_scan" && (
-                    <div className="inbox-context-warning">
-                      <strong>Browser preview</strong>
-                      <span>
-                        This is a bounded conversation-list preview. Open the platform to verify the full
-                        thread. Goalbar will not send automatically.
-                      </span>
-                    </div>
-                  )}
-                  {selected.source === "platform_api" && selected.kind === "direct_message" && (
-                    <label className="field">
-                      <span>Recipient platform ID</span>
-                      <Input value={recipientId} onChange={(event) => setRecipientId(event.target.value)} />
-                    </label>
-                  )}
-                  <Textarea
-                    rows={10}
-                    value={body}
-                    onChange={(event) => {
-                      setBody(event.target.value)
-                      setApprovalId(null)
-                      setCopied(false)
-                    }}
-                    placeholder="Draft a thoughtful reply…"
-                  />
-                  <div className="reply-actions">
-                    <Button variant="secondary" onClick={() => draft.mutate()} disabled={draft.isPending}>
-                      {draft.isPending ? "Drafting…" : "Draft with Codex"}
-                    </Button>
-                    {localPreview ? (
-                      approvalId ? (
-                        <>
-                          <Button
-                            variant="secondary"
-                            onClick={() => copyApproved.mutate()}
-                            disabled={copyApproved.isPending}
-                          >
-                            <Copy size={14} /> {copied ? "Copied" : "Copy approved text"}
-                          </Button>
-                          {selected.remoteUrl && (
-                            <Button onClick={() => openPlatform.mutate(selected.remoteUrl!)}>
-                              <ArrowUpRight size={14} /> Open platform
+                    {selected.source === "platform_api" && selected.kind === "direct_message" && (
+                      <label className="field">
+                        <span>Recipient platform ID</span>
+                        <Input value={recipientId} onChange={(event) => setRecipientId(event.target.value)} />
+                      </label>
+                    )}
+                    <Textarea
+                      rows={3}
+                      value={body}
+                      onChange={(event) => {
+                        setBody(event.target.value)
+                        setApprovalId(null)
+                        setCopied(false)
+                      }}
+                      placeholder="Draft a thoughtful reply…"
+                    />
+                    <div className="reply-actions">
+                      {localPreview && (
+                        <span className="inbox-no-send-note">
+                          <strong>
+                            {selected.source === "email_notification"
+                              ? selected.contentState === "link_only"
+                                ? "Link-only notification"
+                                : "Email excerpt"
+                              : "Browser preview"}
+                          </strong>
+                          Open the platform to verify the full conversation. Goalbar will not send
+                          automatically.
+                        </span>
+                      )}
+                      <Button variant="secondary" onClick={() => draft.mutate()} disabled={draft.isPending}>
+                        {draft.isPending ? "Drafting…" : "Draft with Codex"}
+                      </Button>
+                      {localPreview ? (
+                        approvalId ? (
+                          <>
+                            <Button
+                              variant="secondary"
+                              onClick={() => copyApproved.mutate()}
+                              disabled={copyApproved.isPending}
+                            >
+                              <Copy size={14} /> {copied ? "Copied" : "Copy approved text"}
                             </Button>
+                            {selected.remoteUrl && (
+                              <Button onClick={() => openPlatform.mutate(selected.remoteUrl!)}>
+                                <ArrowUpRight size={14} /> Open platform
+                              </Button>
+                            )}
+                          </>
+                        ) : (
+                          <Button onClick={() => approve.mutate()} disabled={!body || approve.isPending}>
+                            <Check size={14} /> Approve exact text
+                          </Button>
+                        )
+                      ) : approvalId ? (
+                        <Button onClick={() => send.mutate()} disabled={send.isPending}>
+                          {send.isPending ? (
+                            "Sending…"
+                          ) : (
+                            <>
+                              <Send size={14} /> Send approved text
+                            </>
                           )}
-                        </>
+                        </Button>
                       ) : (
                         <Button onClick={() => approve.mutate()} disabled={!body || approve.isPending}>
                           <Check size={14} /> Approve exact text
                         </Button>
-                      )
-                    ) : approvalId ? (
-                      <Button onClick={() => send.mutate()} disabled={send.isPending}>
-                        {send.isPending ? (
-                          "Sending…"
-                        ) : (
-                          <>
-                            <Send size={14} /> Send approved text
-                          </>
-                        )}
-                      </Button>
-                    ) : (
-                      <Button onClick={() => approve.mutate()} disabled={!body || approve.isPending}>
-                        <Check size={14} /> Approve exact text
-                      </Button>
-                    )}
+                      )}
+                    </div>
                   </div>
-                </>
-              )}
-            </section>
-          </div>
+                )}
+              </section>
+            </>
+          )}
         </div>
-      )}
+      </div>
 
       {actionError && (
-        <div className="inline-error">
+        <div className="inline-error inbox-error-toast">
           <strong>Inbox action could not finish</strong>
           <span>{actionError.message}</span>
         </div>

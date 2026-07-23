@@ -20,6 +20,7 @@ use super::process::{ProcessRunner, minimum_environment};
 use crate::browser::extraction;
 use crate::browser::manager::BrowserManager;
 use crate::browser::policy::{browser_url, platform_from_url, strip_tracking};
+use crate::db::repositories::codex_chat::CodexChatSettingsRepository;
 use crate::domain::Platform;
 use crate::domain::browser::{
     BrowserLoadState, BrowserObservation, BrowserObservationBlock, BrowserPageKind,
@@ -126,6 +127,7 @@ pub enum CodexChatMessageRole {
 pub struct CodexChatState {
     pub thread_id: Option<String>,
     pub messages: Vec<CodexChatMessage>,
+    pub browser_access_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -153,6 +155,14 @@ pub struct CodexChatSummary {
 pub struct CodexChatCollection {
     pub active_thread_id: String,
     pub chats: Vec<CodexChatSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexChatDeletionResult {
+    pub deleted_thread_id: String,
+    pub collection: CodexChatCollection,
+    pub active_chat: CodexChatState,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +208,7 @@ pub struct CodexChatManager {
     connection: Arc<Mutex<Option<Arc<AppServerConnection>>>>,
     browser: BrowserManager,
     active_thread_id: Arc<RwLock<Option<String>>>,
+    settings: CodexChatSettingsRepository,
 }
 
 impl fmt::Debug for CodexChatManager {
@@ -209,11 +220,12 @@ impl fmt::Debug for CodexChatManager {
 }
 
 impl CodexChatManager {
-    pub fn new(browser: BrowserManager) -> Self {
+    pub fn new(browser: BrowserManager, settings: CodexChatSettingsRepository) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             browser,
             active_thread_id: Arc::new(RwLock::new(None)),
+            settings,
         }
     }
 
@@ -249,10 +261,13 @@ impl CodexChatManager {
             .await
             .clone()
             .ok_or_else(|| AppError::NotFound("no active Goalbar chat".to_owned()))?;
-        self.connection(app)
+        let mut state = self
+            .connection(app)
             .await?
             .read_goalbar_thread(&thread_id)
-            .await
+            .await?;
+        state.browser_access_enabled = self.settings.browser_access_enabled(&thread_id).await?;
+        Ok(state)
     }
 
     pub async fn select_thread(
@@ -260,11 +275,12 @@ impl CodexChatManager {
         app: &AppHandle,
         thread_id: &str,
     ) -> AppResult<CodexChatState> {
-        let state = self
+        let mut state = self
             .connection(app)
             .await?
             .read_goalbar_thread(thread_id)
             .await?;
+        state.browser_access_enabled = self.settings.browser_access_enabled(thread_id).await?;
         *self.active_thread_id.write().await = Some(thread_id.to_owned());
         Ok(state)
     }
@@ -277,6 +293,11 @@ impl CodexChatManager {
         active_tab_id: Option<Uuid>,
     ) -> AppResult<CodexChatTurnResult> {
         let message = crate::validation::require_non_empty(message, "chat message", 20_000)?;
+        let active_tab_id = if self.settings.browser_access_enabled(thread_id).await? {
+            active_tab_id
+        } else {
+            None
+        };
         let connection = self.connection(app).await?;
         let result = connection
             .send_message(app, thread_id, &message, active_tab_id)
@@ -308,6 +329,51 @@ impl CodexChatManager {
         Ok(thread_id)
     }
 
+    pub async fn set_browser_access(
+        &self,
+        app: &AppHandle,
+        thread_id: &str,
+        enabled: bool,
+    ) -> AppResult<bool> {
+        self.connection(app)
+            .await?
+            .read_goalbar_thread(thread_id)
+            .await?;
+        self.settings
+            .set_browser_access_enabled(thread_id, enabled)
+            .await?;
+        Ok(enabled)
+    }
+
+    pub async fn delete_thread(
+        &self,
+        app: &AppHandle,
+        thread_id: &str,
+    ) -> AppResult<CodexChatDeletionResult> {
+        let connection = self.connection(app).await?;
+        connection.delete_goalbar_thread(thread_id).await?;
+        self.settings.delete(thread_id).await?;
+        {
+            let mut active_thread_id = self.active_thread_id.write().await;
+            if active_thread_id.as_deref() == Some(thread_id) {
+                *active_thread_id = None;
+            }
+        }
+        let collection = self.list_chats(app).await?;
+        let mut active_chat = connection
+            .read_goalbar_thread(&collection.active_thread_id)
+            .await?;
+        active_chat.browser_access_enabled = self
+            .settings
+            .browser_access_enabled(&collection.active_thread_id)
+            .await?;
+        Ok(CodexChatDeletionResult {
+            deleted_thread_id: thread_id.to_owned(),
+            collection,
+            active_chat,
+        })
+    }
+
     async fn connection(&self, app: &AppHandle) -> AppResult<Arc<AppServerConnection>> {
         let mut guard = self.connection.lock().await;
         if let Some(connection) = guard.as_ref() {
@@ -330,6 +396,7 @@ struct AppServerConnection {
     loaded_thread_ids: Mutex<HashSet<String>>,
     unmaterialized_thread_ids: Mutex<HashSet<String>>,
     started_thread_ids: Mutex<Vec<String>>,
+    deleted_thread_ids: Mutex<HashSet<String>>,
     load_lock: Mutex<()>,
     browser: BrowserManager,
 }
@@ -344,6 +411,7 @@ struct BrowserToolContext {
 #[derive(Default)]
 struct ActiveCodexTurns {
     running_threads: HashSet<String>,
+    deleting_threads: HashSet<String>,
     turn_ids: HashMap<String, String>,
     tool_contexts: HashMap<String, BrowserToolContext>,
     cancellations: HashMap<String, CancellationToken>,
@@ -351,6 +419,9 @@ struct ActiveCodexTurns {
 
 impl ActiveCodexTurns {
     fn reserve(&mut self, thread_id: &str, tool_context: Option<BrowserToolContext>) -> bool {
+        if self.deleting_threads.contains(thread_id) {
+            return false;
+        }
         if !self.running_threads.insert(thread_id.to_owned()) {
             return false;
         }
@@ -361,6 +432,15 @@ impl ActiveCodexTurns {
         self.cancellations
             .insert(thread_id.to_owned(), CancellationToken::new());
         true
+    }
+
+    fn reserve_delete(&mut self, thread_id: &str) -> bool {
+        !self.running_threads.contains(thread_id)
+            && self.deleting_threads.insert(thread_id.to_owned())
+    }
+
+    fn release_delete(&mut self, thread_id: &str) {
+        self.deleting_threads.remove(thread_id);
     }
 
     fn attach_turn(&mut self, thread_id: &str, turn_id: &str) {
@@ -388,6 +468,7 @@ impl ActiveCodexTurns {
             cancellation.cancel();
         }
         self.running_threads.clear();
+        self.deleting_threads.clear();
         self.turn_ids.clear();
         self.tool_contexts.clear();
         self.cancellations.clear();
@@ -467,6 +548,7 @@ impl AppServerConnection {
             loaded_thread_ids: Mutex::new(HashSet::new()),
             unmaterialized_thread_ids: Mutex::new(HashSet::new()),
             started_thread_ids: Mutex::new(Vec::new()),
+            deleted_thread_ids: Mutex::new(HashSet::new()),
             load_lock: Mutex::new(()),
             browser: browser.clone(),
         });
@@ -548,9 +630,16 @@ impl AppServerConnection {
             .ok_or_else(|| {
                 AppError::Agent("Codex app-server returned an invalid chat list".to_owned())
             })?;
+        let deleted_thread_ids = self.deleted_thread_ids.lock().await.clone();
         let goalbar_threads = threads
             .iter()
             .filter(|thread| thread.get("threadSource").and_then(Value::as_str) == Some("goalbar"))
+            .filter(|thread| {
+                thread
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|thread_id| !deleted_thread_ids.contains(thread_id))
+            })
             .collect::<Vec<_>>();
         let started_thread_ids = {
             let mut started = self.started_thread_ids.lock().await;
@@ -574,6 +663,15 @@ impl AppServerConnection {
     }
 
     async fn read_goalbar_thread(&self, thread_id: &str) -> AppResult<CodexChatState> {
+        if self.deleted_thread_ids.lock().await.contains(thread_id) {
+            return Err(AppError::NotFound(format!("Goalbar chat {thread_id}")));
+        }
+        let known_goalbar_thread = self
+            .loaded_thread_ids
+            .lock()
+            .await
+            .iter()
+            .any(|loaded_id| loaded_id == thread_id);
         let (params, include_turns) = {
             let unmaterialized = self.unmaterialized_thread_ids.lock().await;
             (
@@ -596,8 +694,38 @@ impl AppServerConnection {
         let thread = result.get("thread").ok_or_else(|| {
             AppError::Agent("Codex app-server returned an invalid chat".to_owned())
         })?;
-        ensure_goalbar_thread(thread, thread_id)?;
+        ensure_goalbar_thread(thread, thread_id, known_goalbar_thread)?;
         codex_chat_state(thread)
+    }
+
+    async fn delete_goalbar_thread(&self, thread_id: &str) -> AppResult<()> {
+        if !self.active_turns.lock().await.reserve_delete(thread_id) {
+            return Err(AppError::Validation(
+                "stop this Goalbar chat before deleting it".to_owned(),
+            ));
+        }
+        let result = async {
+            self.read_goalbar_thread(thread_id).await?;
+            self.request("thread/delete", thread_delete_params(thread_id))
+                .await?;
+            self.loaded_thread_ids.lock().await.remove(thread_id);
+            self.unmaterialized_thread_ids
+                .lock()
+                .await
+                .remove(thread_id);
+            self.started_thread_ids
+                .lock()
+                .await
+                .retain(|started_id| started_id != thread_id);
+            self.deleted_thread_ids
+                .lock()
+                .await
+                .insert(thread_id.to_owned());
+            Ok(())
+        }
+        .await;
+        self.active_turns.lock().await.release_delete(thread_id);
+        result
     }
 
     async fn ensure_thread_loaded(&self, thread_id: &str) -> AppResult<()> {
@@ -817,13 +945,20 @@ impl Drop for AppServerConnection {
     }
 }
 
-fn ensure_goalbar_thread(thread: &Value, expected_id: &str) -> AppResult<()> {
+fn ensure_goalbar_thread(
+    thread: &Value,
+    expected_id: &str,
+    known_goalbar_thread: bool,
+) -> AppResult<()> {
     let thread_id = thread.get("id").and_then(Value::as_str).ok_or_else(|| {
         AppError::Agent("Codex app-server returned a chat without an id".to_owned())
     })?;
-    if thread_id != expected_id
-        || thread.get("threadSource").and_then(Value::as_str) != Some("goalbar")
-    {
+    let thread_source = thread.get("threadSource").and_then(Value::as_str);
+    // Codex may omit this optional field when a new thread is read without turns.
+    // Only trust that omission after this connection has started or validated the ID.
+    let is_goalbar_thread =
+        thread_source == Some("goalbar") || (thread_source.is_none() && known_goalbar_thread);
+    if thread_id != expected_id || !is_goalbar_thread {
         return Err(AppError::NotFound(format!("Goalbar chat {expected_id}")));
     }
     Ok(())
@@ -949,6 +1084,7 @@ fn codex_chat_state(thread: &Value) -> AppResult<CodexChatState> {
     Ok(CodexChatState {
         thread_id: Some(thread_id),
         messages,
+        browser_access_enabled: true,
     })
 }
 
@@ -957,6 +1093,10 @@ fn thread_read_params(thread_id: &str, unmaterialized_thread_ids: &HashSet<Strin
         "threadId": thread_id,
         "includeTurns": !unmaterialized_thread_ids.contains(thread_id)
     })
+}
+
+fn thread_delete_params(thread_id: &str) -> Value {
+    json!({"threadId": thread_id})
 }
 
 fn is_unmaterialized_thread_read_error(error: &AppError) -> bool {
@@ -1935,9 +2075,9 @@ mod tests {
         ActiveCodexTurns, BrowserTurnRoute, CodexChatMessageRole, CodexChatStatus,
         CodexChatSummary, append_bounded, append_unique_feed_posts, bounded_integer_argument,
         browser_tool_specs, browser_turn_route, codex_chat_state, codex_chat_summary,
-        feed_scan_scroll_delta, is_unmaterialized_thread_read_error,
-        merge_started_chat_placeholders, observed_link, request_id_key, thread_is_unmaterialized,
-        thread_read_params, thread_start_params,
+        ensure_goalbar_thread, feed_scan_scroll_delta, is_unmaterialized_thread_read_error,
+        merge_started_chat_placeholders, observed_link, request_id_key, thread_delete_params,
+        thread_is_unmaterialized, thread_read_params, thread_start_params,
     };
 
     #[test]
@@ -1967,6 +2107,7 @@ mod tests {
         assert_eq!(snapshot.messages[0].role, CodexChatMessageRole::User);
         assert_eq!(snapshot.messages[1].role, CodexChatMessageRole::Assistant);
         assert_eq!(snapshot.messages[0].body, "Who is my ICP?");
+        assert!(snapshot.browser_access_enabled);
     }
 
     #[test]
@@ -2033,6 +2174,23 @@ mod tests {
     }
 
     #[test]
+    fn locally_started_chat_accepts_an_omitted_thread_source() {
+        let thread = serde_json::json!({
+            "id": "new-thread",
+            "turns": []
+        });
+        let other_source = serde_json::json!({
+            "id": "new-thread",
+            "threadSource": "other-client",
+            "turns": []
+        });
+
+        assert!(ensure_goalbar_thread(&thread, "new-thread", true).is_ok());
+        assert!(ensure_goalbar_thread(&thread, "new-thread", false).is_err());
+        assert!(ensure_goalbar_thread(&other_source, "new-thread", true).is_err());
+    }
+
+    #[test]
     fn persisted_chat_without_an_exposed_path_still_restores_its_turns() {
         assert!(!thread_is_unmaterialized(&serde_json::json!({
             "id": "saved-thread",
@@ -2066,7 +2224,6 @@ mod tests {
         assert!(turns.reserve("thread-one", None));
         assert!(turns.reserve("thread-two", None));
         assert!(!turns.reserve("thread-one", None));
-
         turns.attach_turn("thread-one", "turn-one");
         turns.attach_turn("thread-two", "turn-two");
         assert_eq!(turns.turn_id("thread-one"), Some("turn-one"));
@@ -2082,8 +2239,19 @@ mod tests {
         assert!(!second_cancellation.is_cancelled());
 
         turns.release("thread-one");
+        assert!(turns.reserve_delete("thread-one"));
+        assert!(!turns.reserve("thread-one", None));
+        turns.release_delete("thread-one");
         assert!(turns.reserve("thread-one", None));
         assert_eq!(turns.turn_id("thread-two"), Some("turn-two"));
+    }
+
+    #[test]
+    fn chat_deletion_targets_exactly_one_thread() {
+        assert_eq!(
+            thread_delete_params("thread-one"),
+            serde_json::json!({"threadId": "thread-one"})
+        );
     }
 
     #[test]

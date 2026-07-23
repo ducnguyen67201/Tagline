@@ -2821,6 +2821,12 @@ body {
   background: var(--accent-soft);
 }
 
+.chat-delete-button:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: rgba(201, 66, 58, 0.3);
+  background: rgba(201, 66, 58, 0.06);
+}
+
 .chat-new-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
@@ -2886,6 +2892,48 @@ body {
 .founder-chat-tabs button:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+.chat-delete-confirmation {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  color: #7d3e39;
+  border-bottom: 1px solid rgba(201, 66, 58, 0.18);
+  background: rgba(201, 66, 58, 0.06);
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.chat-delete-confirmation > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.chat-delete-confirmation button {
+  min-height: 24px;
+  padding: 4px 7px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.chat-delete-confirmation button.danger {
+  color: var(--danger);
+  border-color: rgba(201, 66, 58, 0.3);
+}
+
+.chat-delete-confirmation button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .chat-tab-status {
@@ -3313,6 +3361,11 @@ body {
   color: #4f651a;
   border-color: #c9dc98;
   background: #f8fbef;
+}
+
+.founder-chat-addons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .founder-chat-addons button span {

@@ -210,12 +210,17 @@ impl BrowserInboxService {
                 "SELECT EXISTS(
                     SELECT 1 FROM browser_inbox_ingestions
                     WHERE platform = 'linkedin'
+                      AND (
+                        LOWER(remote_url) = 'https://www.linkedin.com/messaging/'
+                        OR LOWER(remote_url) LIKE '%/undefined%'
+                      )
                 )
-                AND NOT EXISTS(
-                    SELECT 1 FROM browser_inbox_ingestions
+                OR EXISTS(
+                    SELECT 1
+                    FROM browser_inbox_ingestions
                     WHERE platform = 'linkedin'
-                      AND LOWER(remote_url) != 'https://www.linkedin.com/messaging/'
-                      AND LOWER(remote_url) NOT LIKE '%/undefined%'
+                    GROUP BY LOWER(remote_url)
+                    HAVING COUNT(DISTINCT remote_id) > 1
                 )",
             )
             .fetch_one(&self.pool)
@@ -809,6 +814,54 @@ mod tests {
                 .await
                 .expect("scan mode"),
             BrowserInboxScanMode::Incremental
+        );
+    }
+
+    #[tokio::test]
+    async fn linkedin_scan_stays_full_when_distinct_rows_share_a_thread_url() {
+        let database = Database::in_memory().await.expect("database");
+        let service = BrowserInboxService::new(BrowserManager::default(), database.pool().clone());
+        let shared_url = "https://www.linkedin.com/messaging/thread/wrong-thread/";
+        service
+            .ingest(
+                Platform::Linkedin,
+                BrowserInboxPageScan {
+                    state: BrowserInboxPageState::Ready,
+                    mode: BrowserInboxScanMode::Initial,
+                    stop: BrowserInboxScanStop::Exhausted,
+                    items: vec![
+                        BrowserInboxItem {
+                            remote_id: "fallback:linkedin:mina".to_owned(),
+                            display_name: "Mina".to_owned(),
+                            preview: "Status is reachable".to_owned(),
+                            unread: false,
+                            remote_url: shared_url.to_owned(),
+                            profile_url: Some("https://www.linkedin.com/in/mina/".to_owned()),
+                            timestamp: None,
+                            direction: BrowserInboxDirection::Inbound,
+                        },
+                        BrowserInboxItem {
+                            remote_id: "fallback:linkedin:ross".to_owned(),
+                            display_name: "Ross".to_owned(),
+                            preview: "Status is reachable".to_owned(),
+                            unread: false,
+                            remote_url: shared_url.to_owned(),
+                            profile_url: Some("https://www.linkedin.com/in/ross/".to_owned()),
+                            timestamp: None,
+                            direction: BrowserInboxDirection::Inbound,
+                        },
+                    ],
+                },
+            )
+            .await
+            .expect("legacy scan");
+
+        assert_eq!(
+            service
+                .scan_mode(Platform::Linkedin)
+                .await
+                .expect("scan mode"),
+            BrowserInboxScanMode::Initial
         );
     }
 

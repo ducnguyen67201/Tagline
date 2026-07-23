@@ -183,6 +183,78 @@ describe("browser inbox extraction script", () => {
     )
   })
 
+  it("does not turn a missing LinkedIn row link into the currently open thread", () => {
+    window.history.replaceState({}, "", "/messaging/thread/wrong-thread/")
+    document.body.innerHTML = `
+      <main>
+        <li id="mina" class="msg-conversation-listitem">
+          <a href="https://www.linkedin.com/in/mina/"><strong>Mina</strong></a>
+          <span>Status is reachable</span>
+        </li>
+      </main>
+    `
+    setInnerText("#mina", "Mina\nStatus is reachable\nNow")
+
+    const result = scan("linkedin", "/messaging/thread/wrong-thread/")
+
+    expect(result.items[0]?.remoteUrl).toBe("https://www.linkedin.com/messaging/")
+  })
+
+  it("resolves missing LinkedIn deep links from the row that was selected", () => {
+    document.body.innerHTML = `
+      <main>
+        <li data-item-id="mina" class="msg-conversation-listitem">
+          <a href="https://www.linkedin.com/in/mina/"><strong>Mina</strong></a>
+          <button type="button">Open Mina</button>
+        </li>
+        <li data-item-id="ross" class="msg-conversation-listitem">
+          <a href="https://www.linkedin.com/in/ross/"><strong>Ross</strong></a>
+          <button type="button">Open Ross</button>
+        </li>
+      </main>
+      <section class="msg-thread">
+        <a class="msg-thread__link-to-profile" href="https://www.linkedin.com/in/initial/"></a>
+      </section>
+    `
+    setInnerText('[data-item-id="mina"]', "Mina\nStatus is reachable\nNow")
+    setInnerText('[data-item-id="ross"]', "Ross\nStatus is reachable\nNow")
+    document.querySelector('[data-item-id="mina"]')?.addEventListener("click", () => {
+      window.history.replaceState({}, "", "/messaging/thread/mina-thread/")
+      document
+        .querySelector(".msg-thread__link-to-profile")
+        ?.setAttribute("href", "https://www.linkedin.com/in/mina/")
+    })
+    document.querySelector('[data-item-id="ross"]')?.addEventListener("click", () => {
+      window.history.replaceState({}, "", "/messaging/thread/ross-thread/")
+      document
+        .querySelector(".msg-thread__link-to-profile")
+        ?.setAttribute("href", "https://www.linkedin.com/in/ross/")
+    })
+
+    const first = scan("linkedin", "/messaging/")
+    const second = scan("linkedin", "/messaging/thread/mina-thread/", "next")
+    const third = scan("linkedin", "/messaging/thread/ross-thread/", "next")
+
+    expect(first.items.find((item) => item.remoteId === "mina")?.remoteUrl).toBe(
+      "https://www.linkedin.com/messaging/",
+    )
+    expect(second.items.find((item) => item.remoteId === "mina")?.remoteUrl).toBe(
+      "https://www.linkedin.com/messaging/thread/mina-thread/",
+    )
+    expect(third.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          remoteId: "mina",
+          remoteUrl: "https://www.linkedin.com/messaging/thread/mina-thread/",
+        }),
+        expect.objectContaining({
+          remoteId: "ross",
+          remoteUrl: "https://www.linkedin.com/messaging/thread/ross-thread/",
+        }),
+      ]),
+    )
+  })
+
   it("opens a LinkedIn row once and captures the profile exposed by the thread header", () => {
     document.body.innerHTML = `
       <main>
@@ -198,6 +270,7 @@ describe("browser inbox extraction script", () => {
       document.body.insertAdjacentHTML(
         "beforeend",
         `<section class="msg-thread">
+          <h2>Vy Nguyen</h2>
           <a
             class="msg-thread__link-to-profile"
             aria-label="View profile"

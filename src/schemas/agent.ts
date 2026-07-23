@@ -98,6 +98,7 @@ export const codexChatStateSchema = z
   .object({
     threadId: z.string().min(1).nullable(),
     messages: z.array(codexChatMessageSchema).max(200),
+    browserAccessEnabled: z.boolean(),
   })
   .strict()
 
@@ -130,6 +131,27 @@ export const selectCodexChatInputSchema = z
 export const interruptCodexChatInputSchema = z
   .object({
     threadId: z.string().min(1),
+  })
+  .strict()
+
+export const deleteCodexChatInputSchema = z
+  .object({
+    threadId: z.string().min(1),
+  })
+  .strict()
+
+export const setCodexChatBrowserAccessInputSchema = z
+  .object({
+    threadId: z.string().min(1),
+    enabled: z.boolean(),
+  })
+  .strict()
+
+export const codexChatDeletionResultSchema = z
+  .object({
+    deletedThreadId: z.string().min(1),
+    collection: codexChatCollectionSchema,
+    activeChat: codexChatStateSchema,
   })
   .strict()
 

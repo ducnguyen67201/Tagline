@@ -29,6 +29,7 @@ describe("boundary schemas", () => {
     expect(
       codexChatStateSchema.parse({
         threadId: "thread-1",
+        browserAccessEnabled: true,
         messages: [
           {
             id: "b9d7afe0-1807-4ad9-bf22-2945f0bb9081",

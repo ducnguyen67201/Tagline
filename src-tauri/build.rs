@@ -9,6 +9,8 @@ fn main() {
         "select_codex_chat",
         "interrupt_codex_chat",
         "new_codex_chat",
+        "delete_codex_chat",
+        "set_codex_chat_browser_access",
         "cancel_job",
         "save_founder_profile",
         "save_voice_profile",

@@ -16,8 +16,10 @@
       .filter(Boolean)
       .filter((value, index, values) => values.indexOf(value) === index)
   const canonical = (value) => {
+    const candidate = normalize(value)
+    if (!candidate) return null
     try {
-      const url = new URL(value, window.location.href)
+      const url = new URL(candidate, window.location.href)
       if (url.protocol !== "https:") return null
       url.search = ""
       url.hash = ""
@@ -27,8 +29,10 @@
     }
   }
   const canonicalProfile = (value) => {
+    const candidate = normalize(value)
+    if (!candidate) return null
     try {
-      const url = new URL(value, window.location.href)
+      const url = new URL(candidate, window.location.href)
       if (platform === "linkedin") {
         const host = url.hostname.toLocaleLowerCase().replace(/^www\./, "")
         const segments = url.pathname.split("/").filter(Boolean)
@@ -299,6 +303,9 @@
       profileUrls: Object.create(null),
       attemptedProfiles: Object.create(null),
       pendingProfile: null,
+      threadUrls: Object.create(null),
+      attemptedThreads: Object.create(null),
+      pendingThread: null,
     }
     globalThis[scanKey] = scanState
   }
@@ -306,16 +313,32 @@
     .map((row) => ({ row, item: itemFor(row) }))
     .filter(({ item }) => Boolean(item))
     .slice(0, 100)
+  const directUrlCounts = rowItems.reduce((counts, { item }) => {
+    if (item.remoteUrl === targetUrl || !isConversationUrl(item.remoteUrl)) return counts
+    counts[item.remoteUrl] = (counts[item.remoteUrl] || 0) + 1
+    return counts
+  }, Object.create(null))
   for (const { item } of rowItems) {
+    if (
+      item.remoteUrl !== targetUrl &&
+      isConversationUrl(item.remoteUrl) &&
+      directUrlCounts[item.remoteUrl] === 1
+    ) {
+      scanState.threadUrls[item.remoteId] = item.remoteUrl
+      scanState.attemptedThreads[item.remoteId] = true
+    }
     if (!item.profileUrl) continue
     scanState.profileUrls[item.remoteId] = item.profileUrl
     scanState.attemptedProfiles[item.remoteId] = true
   }
-  const linkedInProfileFor = (displayName) => {
+  const linkedInThreadProfile = () => {
     const threadProfileLink = document.querySelector(
       'a.msg-thread__link-to-profile[href*="/in/"], .msg-thread__link-to-profile a[href*="/in/"]',
     )
-    const threadProfileUrl = canonicalProfile(threadProfileLink?.href)
+    return canonicalProfile(threadProfileLink?.href)
+  }
+  const linkedInProfileFor = (displayName) => {
+    const threadProfileUrl = linkedInThreadProfile()
     if (threadProfileUrl) return threadProfileUrl
 
     const targetName = normalize(displayName).toLocaleLowerCase()
@@ -339,14 +362,113 @@
       .map((anchor) => canonicalProfile(anchor.href))
       .find(Boolean)
   }
+  const linkedInThreadMatches = (pending) => {
+    const expectedProfile = pending.profileUrl || scanState.profileUrls[pending.remoteId]
+    const threadProfile = linkedInThreadProfile()
+    if (expectedProfile && threadProfile) return expectedProfile === threadProfile
+
+    const targetName = normalize(pending.displayName).toLocaleLowerCase()
+    if (!targetName) return false
+    const thread = document.querySelector(
+      ".msg-thread, .msg-s-message-list-container, [data-view-name='message-thread']",
+    )
+    return normalize(thread?.innerText || thread?.textContent)
+      .toLocaleLowerCase()
+      .includes(targetName)
+  }
+  const clickLinkedInRow = (row) => {
+    const clickable =
+      (row.matches?.("a, button") && row) ||
+      row.querySelector(
+        ".msg-conversations-container__convo-item-link, a[href*='/messaging/thread/'], button",
+      ) ||
+      row
+    if (
+      clickable.tagName === "A" &&
+      clickable.pathname
+        .split("/")
+        .filter(Boolean)
+        .some((segment) => segment.toLocaleLowerCase() === "undefined")
+    ) {
+      clickable.addEventListener("click", (event) => event.preventDefault(), {
+        capture: true,
+        once: true,
+      })
+    }
+    clickable.click()
+  }
   if (platform === "linkedin" && scanState.pendingProfile) {
     const pending = scanState.pendingProfile
     const profileUrl = linkedInProfileFor(pending.displayName)
     if (profileUrl) scanState.profileUrls[pending.remoteId] = profileUrl
     scanState.pendingProfile = null
   }
+  if (platform === "linkedin") {
+    if (scanState.pendingThread) {
+      const pending = scanState.pendingThread
+      const threadMatches = linkedInThreadMatches(pending)
+      const observedProfile = linkedInThreadProfile()
+      if (threadMatches && observedProfile) {
+        scanState.profileUrls[pending.remoteId] = observedProfile
+        scanState.attemptedProfiles[pending.remoteId] = true
+      }
+      const currentLocation = new URL(
+        `${window.location.pathname}${window.location.search}`,
+        targetUrl,
+      ).toString()
+      const currentThreadUrl = isConversationUrl(currentLocation)
+        ? canonicalConversation(currentLocation)
+        : null
+      if (currentThreadUrl && threadMatches) {
+        scanState.threadUrls[pending.remoteId] = currentThreadUrl
+        scanState.attemptedThreads[pending.remoteId] = true
+        const profileUrl = linkedInThreadProfile()
+        if (profileUrl) {
+          scanState.profileUrls[pending.remoteId] = profileUrl
+          scanState.attemptedProfiles[pending.remoteId] = true
+        }
+        scanState.pendingThread = null
+      } else if (pending.attempts >= 3) {
+        scanState.attemptedThreads[pending.remoteId] = true
+        scanState.pendingThread = null
+      } else {
+        const pendingRow = rowItems.find(({ item }) => item.remoteId === pending.remoteId)
+        if (pendingRow) {
+          pending.attempts += 1
+          clickLinkedInRow(pendingRow.row)
+          const items = rowItems.map(({ item }) => ({
+            ...item,
+            remoteUrl: scanState.threadUrls[item.remoteId] || targetUrl,
+            profileUrl: scanState.profileUrls[item.remoteId] || item.profileUrl,
+          }))
+          return JSON.stringify({ state, items, hasMore: true, madeProgress: true, targetUrl })
+        }
+        scanState.attemptedThreads[pending.remoteId] = true
+        scanState.pendingThread = null
+      }
+    }
+    const unresolvedThread = rowItems.find(
+      ({ item }) => !scanState.attemptedThreads[item.remoteId] && !scanState.threadUrls[item.remoteId],
+    )
+    if (unresolvedThread) {
+      scanState.pendingThread = {
+        remoteId: unresolvedThread.item.remoteId,
+        displayName: unresolvedThread.item.displayName,
+        profileUrl: unresolvedThread.item.profileUrl,
+        attempts: 0,
+      }
+      clickLinkedInRow(unresolvedThread.row)
+      const items = rowItems.map(({ item }) => ({
+        ...item,
+        remoteUrl: scanState.threadUrls[item.remoteId] || targetUrl,
+        profileUrl: scanState.profileUrls[item.remoteId] || item.profileUrl,
+      }))
+      return JSON.stringify({ state, items, hasMore: true, madeProgress: true, targetUrl })
+    }
+  }
   const items = rowItems.map(({ item }) => ({
     ...item,
+    remoteUrl: scanState.threadUrls[item.remoteId] || item.remoteUrl,
     profileUrl: scanState.profileUrls[item.remoteId] || item.profileUrl,
   }))
   if (platform === "linkedin") {
@@ -359,24 +481,7 @@
         remoteId: unresolved.item.remoteId,
         displayName: unresolved.item.displayName,
       }
-      const row = unresolved.row
-      const clickable =
-        (row.matches?.("a, button") && row) ||
-        row.querySelector(".msg-conversations-container__convo-item-link, a[href*='/messaging/thread/']") ||
-        row
-      if (
-        clickable.tagName === "A" &&
-        clickable.pathname
-          .split("/")
-          .filter(Boolean)
-          .some((segment) => segment.toLocaleLowerCase() === "undefined")
-      ) {
-        clickable.addEventListener("click", (event) => event.preventDefault(), {
-          capture: true,
-          once: true,
-        })
-      }
-      clickable.click()
+      clickLinkedInRow(unresolved.row)
       return JSON.stringify({ state, items, hasMore: true, madeProgress: true, targetUrl })
     }
   }

@@ -14,6 +14,8 @@
     "allow-select-codex-chat",
     "allow-interrupt-codex-chat",
     "allow-new-codex-chat",
+    "allow-delete-codex-chat",
+    "allow-set-codex-chat-browser-access",
     "allow-cancel-job",
     "allow-save-founder-profile",
     "allow-save-voice-profile",

@@ -220,3 +220,17 @@ async fn migration_fifteen_persists_browser_inbox_profile_links() {
     .expect("browser inbox profile column");
     assert_eq!(profile_columns, 1);
 }
+
+#[tokio::test]
+async fn migration_sixteen_persists_per_chat_browser_access() {
+    let database = Database::in_memory().await.expect("database");
+    let schema: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind("codex_chat_settings")
+            .fetch_one(database.pool())
+            .await
+            .expect("Codex chat settings schema");
+
+    assert!(schema.contains("thread_id TEXT PRIMARY KEY"));
+    assert!(schema.contains("browser_access_enabled"));
+}

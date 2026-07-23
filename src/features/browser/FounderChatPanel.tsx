@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { listen } from "@tauri-apps/api/event"
 import {
   Archive,
@@ -12,6 +12,7 @@ import {
   Send,
   Sparkles,
   Square,
+  Trash2,
   XCircle,
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
@@ -24,12 +25,15 @@ import { Textarea } from "@/components/ui/textarea"
 import { EngagementSuggestionCard } from "@/features/browser/EngagementSuggestionCard"
 import { parseEngagementSuggestion } from "@/features/browser/engagement-suggestion"
 import { HistoryImportPanel } from "@/features/browser/HistoryImportPanel"
+import { queryKeys } from "@/lib/query-keys"
 import { invokeOutput, invokeValidated, isTauriRuntime } from "@/lib/tauri"
 import {
   codexChatCollectionSchema,
+  codexChatDeletionResultSchema,
   codexChatEventSchema,
   codexChatStateSchema,
   codexChatTurnResultSchema,
+  deleteCodexChatInputSchema,
   founderChatAgentResultSchema,
   founderChatOutputJsonSchema,
   founderChatResearchRequestSchema,
@@ -38,6 +42,7 @@ import {
   runAgentTaskInputSchema,
   selectCodexChatInputSchema,
   sendCodexChatInputSchema,
+  setCodexChatBrowserAccessInputSchema,
   type AgentProvider,
   type CodexChatEvent,
   type CodexChatSummary,
@@ -82,6 +87,7 @@ type ChatSubmission = {
   displayMessage?: string
   tab: BrowserTab | null
   provider: AgentProvider
+  browserUseEnabled: boolean
 }
 
 type CodexChatSubmission = {
@@ -95,6 +101,13 @@ type CodexToolActivity = {
   tool: string
   status: "running" | "completed" | "paused"
   message: string | null
+}
+
+type FounderChatSessionCache = {
+  activeChatId: string
+  chats: CodexChatSummary[]
+  transcripts: Record<string, ChatMessage[]>
+  browserDisabledChatIds: string[]
 }
 
 const AUTOMATIC_BROWSER_MAX_ITEMS = 25
@@ -240,10 +253,20 @@ function browserToolLabel(tool: string) {
 
 export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: FounderChatPanelProps) {
   const bootstrap = useBootstrap()
+  const queryClient = useQueryClient()
+  const [cachedSession] = useState(() => {
+    queryClient.setQueryDefaults(queryKeys.founderChatSession, { gcTime: Infinity })
+    return queryClient.getQueryData<FounderChatSessionCache>(queryKeys.founderChatSession)
+  })
   const [provider, setProvider] = useState<AgentProvider>("codex")
-  const [codexChats, setCodexChats] = useState<CodexChatSummary[]>([previewCodexChat])
-  const [activeChatId, setActiveChatId] = useState(PREVIEW_CODEX_CHAT_ID)
-  const [messages, setMessages] = useState<ChatMessage[]>([initialMessage])
+  const [codexChats, setCodexChats] = useState<CodexChatSummary[]>(
+    () => cachedSession?.chats ?? [previewCodexChat],
+  )
+  const [activeChatId, setActiveChatId] = useState(() => cachedSession?.activeChatId ?? PREVIEW_CODEX_CHAT_ID)
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [
+    initialMessage,
+    ...(cachedSession?.transcripts[cachedSession.activeChatId] ?? []),
+  ])
   const [composer, setComposer] = useState("")
   const [researchRequest, setResearchRequest] = useState<FounderChatResearchRequest | null>(null)
   const [researchTab, setResearchTab] = useState<BrowserTab | null>(null)
@@ -255,9 +278,16 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
   const [codexToolActivity, setCodexToolActivity] = useState<CodexToolActivity | null>(null)
   const [chatStateError, setChatStateError] = useState<Error | null>(null)
   const [pendingThreadIds, setPendingThreadIds] = useState<Set<string>>(() => new Set())
-  const activeChatIdRef = useRef(PREVIEW_CODEX_CHAT_ID)
+  const [browserDisabledChatIds, setBrowserDisabledChatIds] = useState<Set<string>>(
+    () => new Set(cachedSession?.browserDisabledChatIds ?? []),
+  )
+  const [deleteConfirmationThreadId, setDeleteConfirmationThreadId] = useState<string | null>(null)
+  const activeChatIdRef = useRef(cachedSession?.activeChatId ?? PREVIEW_CODEX_CHAT_ID)
   const pendingThreadIdsRef = useRef(new Set<string>())
-  const transcriptsRef = useRef(new Map<string, ChatMessage[]>())
+  const transcriptsRef = useRef(
+    new Map<string, ChatMessage[]>(Object.entries(cachedSession?.transcripts ?? {})),
+  )
+  const selectionRevisionRef = useRef(0)
 
   const agentStatuses = useMemo(
     () => new Map(bootstrap.data?.agents.map((status) => [status.provider, status])),
@@ -265,6 +295,20 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
   )
   const activeCodexChat = codexChats.find((chat) => chat.threadId === activeChatId) ?? null
   const streamingReply = streamingReplies.get(activeChatId) ?? ""
+  const browserPermissionKey = provider === "codex" ? activeChatId : "claude"
+  const browserUseEnabled = !browserDisabledChatIds.has(browserPermissionKey)
+
+  const updateBrowserAccessState = useCallback((threadId: string, enabled: boolean) => {
+    setBrowserDisabledChatIds((current) => {
+      const next = new Set(current)
+      if (enabled) {
+        next.delete(threadId)
+      } else {
+        next.add(threadId)
+      }
+      return next
+    })
+  }, [])
 
   const resetChatSurface = useCallback(() => {
     setComposer("")
@@ -282,12 +326,13 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
       const state = await invokeOutput("get_codex_chat_state", {}, codexChatStateSchema)
       if (state.threadId !== activeChatIdRef.current) return
       transcriptsRef.current.set(state.threadId, state.messages)
+      updateBrowserAccessState(state.threadId, state.browserAccessEnabled)
       setMessages([initialMessage, ...state.messages])
       setChatStateError(null)
     } catch (error) {
       setChatStateError(error instanceof Error ? error : new Error(String(error)))
     }
-  }, [])
+  }, [updateBrowserAccessState])
 
   const refreshCodexChats = useCallback(async () => {
     if (!isTauriRuntime()) return
@@ -306,24 +351,45 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
 
   useEffect(() => {
     if (!isTauriRuntime()) return
+    let disposed = false
+    const hydrationRevision = selectionRevisionRef.current
     const hydrationTimer = window.setTimeout(() => {
       void (async () => {
         try {
           const collection = await invokeOutput("list_codex_chats", {}, codexChatCollectionSchema)
-          activeChatIdRef.current = collection.activeThreadId
-          setActiveChatId(collection.activeThreadId)
+          if (disposed) return
           setCodexChats(
             collection.chats.map((chat) =>
               pendingThreadIdsRef.current.has(chat.threadId) ? { ...chat, status: "active" } : chat,
             ),
           )
-          const state = await invokeOutput("get_codex_chat_state", {}, codexChatStateSchema)
-          if (state.threadId === collection.activeThreadId) {
+          if (selectionRevisionRef.current !== hydrationRevision) return
+          const cachedThreadId =
+            cachedSession && collection.chats.some((chat) => chat.threadId === cachedSession.activeChatId)
+              ? cachedSession.activeChatId
+              : null
+          const preferredThreadId = cachedThreadId ?? collection.activeThreadId
+          activeChatIdRef.current = preferredThreadId
+          setActiveChatId(preferredThreadId)
+          setMessages([initialMessage, ...(transcriptsRef.current.get(preferredThreadId) ?? [])])
+          const state =
+            preferredThreadId === collection.activeThreadId
+              ? await invokeOutput("get_codex_chat_state", {}, codexChatStateSchema)
+              : await invokeValidated(
+                  "select_codex_chat",
+                  { input: { threadId: preferredThreadId } },
+                  selectCodexChatInputSchema,
+                  codexChatStateSchema,
+                )
+          if (disposed || selectionRevisionRef.current !== hydrationRevision) return
+          if (state.threadId === preferredThreadId) {
             transcriptsRef.current.set(state.threadId, state.messages)
+            updateBrowserAccessState(state.threadId, state.browserAccessEnabled)
             setMessages([initialMessage, ...state.messages])
           }
           setChatStateError(null)
         } catch (error) {
+          if (disposed) return
           setChatStateError(error instanceof Error ? error : new Error(String(error)))
         }
       })()
@@ -377,17 +443,27 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
       }
     })
     return () => {
+      disposed = true
       window.clearTimeout(hydrationTimer)
       void progressListener.then((dispose) => dispose())
       void traceListener.then((dispose) => dispose())
       void findingListener.then((dispose) => dispose())
       void codexChatListener.then((dispose) => dispose())
     }
-  }, [hydrateCodexChat, refreshCodexChats])
+  }, [cachedSession, hydrateCodexChat, refreshCodexChats, updateBrowserAccessState])
 
   useEffect(() => {
     transcriptsRef.current.set(activeChatId, messages.slice(1))
   }, [activeChatId, messages])
+
+  useEffect(() => {
+    queryClient.setQueryData<FounderChatSessionCache>(queryKeys.founderChatSession, {
+      activeChatId,
+      chats: codexChats,
+      transcripts: Object.fromEntries(transcriptsRef.current),
+      browserDisabledChatIds: [...browserDisabledChatIds],
+    })
+  }, [activeChatId, browserDisabledChatIds, codexChats, messages, queryClient])
 
   const loadResearchArtifacts = async (runId: string) => {
     if (!isTauriRuntime()) return
@@ -581,7 +657,12 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
   })
 
   const chat = useMutation({
-    mutationFn: async ({ message, tab, provider: chatProvider }: ChatSubmission) => {
+    mutationFn: async ({
+      message,
+      tab,
+      provider: chatProvider,
+      browserUseEnabled: submissionBrowserUseEnabled,
+    }: ChatSubmission) => {
       if (!isTauriRuntime()) return previewFounderChatTurn(message)
       const input = {
         provider: chatProvider,
@@ -598,13 +679,16 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
                 platform: tab.platform ?? null,
               }
             : null,
-          tools: [
-            {
-              name: "browser_use_current_tab",
-              description:
-                "Automatically observe, scroll, follow visible same-platform links, and go back in the current supported tab. It pauses before typing, arbitrary clicks, publishing, messaging, liking, following, or any account state change.",
-            },
-          ],
+          browserAccess: submissionBrowserUseEnabled ? "enabled" : "disabled_by_user",
+          tools: submissionBrowserUseEnabled
+            ? [
+                {
+                  name: "browser_use_current_tab",
+                  description:
+                    "Automatically observe, scroll, follow visible same-platform links, and go back in the current supported tab. It pauses before typing, arbitrary clicks, publishing, messaging, liking, following, or any account state change.",
+                },
+              ]
+            : [],
         },
         outputSchema: founderChatOutputJsonSchema,
       }
@@ -634,6 +718,13 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
       const request = boundAutomaticResearchRequest(turn.researchRequest)
       setResearchRequest(request)
       setResearchTab(submission.tab)
+      if (!submission.browserUseEnabled) {
+        setMessages((current) => [
+          ...current,
+          newMessage("tool", "Browser Use is off for this chat. Turn it on to share the open tab."),
+        ])
+        return
+      }
       if (!submission.tab?.platform) {
         setMessages((current) => [
           ...current,
@@ -659,10 +750,23 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
         return codexChatStateSchema.parse({
           threadId,
           messages: transcriptsRef.current.get(threadId) ?? [],
+          browserAccessEnabled: !browserDisabledChatIds.has(threadId),
         })
       }
       const input = { threadId }
       return invokeValidated("select_codex_chat", { input }, selectCodexChatInputSchema, codexChatStateSchema)
+    },
+    onMutate: (threadId) => {
+      const previousThreadId = activeChatIdRef.current
+      const previousTranscript = transcriptsRef.current.get(previousThreadId) ?? messages.slice(1)
+      transcriptsRef.current.set(previousThreadId, previousTranscript)
+      selectionRevisionRef.current += 1
+      activeChatIdRef.current = threadId
+      setActiveChatId(threadId)
+      setMessages([initialMessage, ...(transcriptsRef.current.get(threadId) ?? [])])
+      setDeleteConfirmationThreadId(null)
+      resetChatSurface()
+      return { previousThreadId, previousTranscript }
     },
     onSuccess: (state, threadId) => {
       const selectedThreadId = state.threadId ?? threadId
@@ -671,10 +775,32 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
           ? (transcriptsRef.current.get(selectedThreadId) ?? [])
           : state.messages
       transcriptsRef.current.set(selectedThreadId, transcript)
-      activeChatIdRef.current = selectedThreadId
-      setActiveChatId(selectedThreadId)
-      setMessages([initialMessage, ...transcript])
-      resetChatSurface()
+      updateBrowserAccessState(selectedThreadId, state.browserAccessEnabled)
+      if (activeChatIdRef.current === selectedThreadId) {
+        setMessages([initialMessage, ...transcript])
+      }
+    },
+    onError: (_error, threadId, context) => {
+      if (!context || activeChatIdRef.current !== threadId) return
+      activeChatIdRef.current = context.previousThreadId
+      setActiveChatId(context.previousThreadId)
+      setMessages([initialMessage, ...context.previousTranscript])
+    },
+  })
+
+  const setCodexChatBrowserAccess = useMutation({
+    mutationFn: async ({ threadId, enabled }: { threadId: string; enabled: boolean }) => {
+      if (!isTauriRuntime()) return enabled
+      const input = { threadId, enabled }
+      return invokeValidated(
+        "set_codex_chat_browser_access",
+        { input },
+        setCodexChatBrowserAccessInputSchema,
+        z.boolean(),
+      )
+    },
+    onSuccess: (enabled, { threadId }) => {
+      updateBrowserAccessState(threadId, enabled)
     },
   })
 
@@ -701,6 +827,78 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
         ])
       }
       setMessages([initialMessage])
+      setDeleteConfirmationThreadId(null)
+      resetChatSurface()
+    },
+  })
+
+  const deleteCodexChat = useMutation({
+    mutationFn: async (threadId: string) => {
+      if (!isTauriRuntime()) {
+        const remainingChats = codexChats.filter((chatItem) => chatItem.threadId !== threadId)
+        const fallbackChat =
+          remainingChats[0] ??
+          ({
+            ...previewCodexChat,
+            threadId: crypto.randomUUID(),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          } satisfies CodexChatSummary)
+        const chats = remainingChats.length > 0 ? remainingChats : [fallbackChat]
+        return codexChatDeletionResultSchema.parse({
+          deletedThreadId: threadId,
+          collection: {
+            activeThreadId: fallbackChat.threadId,
+            chats,
+          },
+          activeChat: {
+            threadId: fallbackChat.threadId,
+            messages: transcriptsRef.current.get(fallbackChat.threadId) ?? [],
+            browserAccessEnabled: !browserDisabledChatIds.has(fallbackChat.threadId),
+          },
+        })
+      }
+      const input = { threadId }
+      return invokeValidated(
+        "delete_codex_chat",
+        { input },
+        deleteCodexChatInputSchema,
+        codexChatDeletionResultSchema,
+      )
+    },
+    onSuccess: (result) => {
+      const deletedThreadId = result.deletedThreadId
+      transcriptsRef.current.delete(deletedThreadId)
+      pendingThreadIdsRef.current.delete(deletedThreadId)
+      setPendingThreadIds(new Set(pendingThreadIdsRef.current))
+      setBrowserDisabledChatIds((current) => {
+        const next = new Set(current)
+        next.delete(deletedThreadId)
+        if (result.activeChat.browserAccessEnabled) {
+          next.delete(result.collection.activeThreadId)
+        } else {
+          next.add(result.collection.activeThreadId)
+        }
+        return next
+      })
+      setStreamingReplies((current) => {
+        const next = new Map(current)
+        next.delete(deletedThreadId)
+        return next
+      })
+      const activeThreadId = result.collection.activeThreadId
+      const transcript = result.activeChat.messages
+      transcriptsRef.current.set(activeThreadId, transcript)
+      activeChatIdRef.current = activeThreadId
+      setActiveChatId(activeThreadId)
+      setCodexChats(
+        result.collection.chats.map((chatItem) =>
+          pendingThreadIdsRef.current.has(chatItem.threadId) ? { ...chatItem, status: "active" } : chatItem,
+        ),
+      )
+      setMessages([initialMessage, ...transcript])
+      setDeleteConfirmationThreadId(null)
+      setChatStateError(null)
       resetChatSurface()
     },
   })
@@ -734,35 +932,53 @@ export function FounderChatPanel({ activeTab, onNavigate, onPrepareReply }: Foun
     if (!message || chat.isPending || selectedCodexChatIsRunning || collect.isPending) return
 
     if (provider === "codex") {
-      codexChat.mutate({ threadId: activeChatId, message, tab: activeTab })
+      codexChat.mutate({
+        threadId: activeChatId,
+        message,
+        tab: browserUseEnabled ? activeTab : null,
+      })
       return
     }
 
     const inferredRequest = inferBrowserResearchRequest(message)
     if (!inferredRequest) {
-      chat.mutate({ message, tab: activeTab, provider })
+      chat.mutate({
+        message,
+        tab: browserUseEnabled ? activeTab : null,
+        provider,
+        browserUseEnabled,
+      })
       return
     }
 
     const request = boundAutomaticResearchRequest(inferredRequest)
-    const response = activeTab?.platform
-      ? `I’ll use Browser Use on the open ${activeTab.platform.toUpperCase()} tab now and return a bounded, grounded result.`
-      : "Browser Use needs an open X, LinkedIn, or Reddit tab."
+    const response = !browserUseEnabled
+      ? "Browser Use is off for this chat. Turn it on to share the open tab."
+      : activeTab?.platform
+        ? `I’ll use Browser Use on the open ${activeTab.platform.toUpperCase()} tab now and return a bounded, grounded result.`
+        : "Browser Use needs an open X, LinkedIn, or Reddit tab."
     setMessages((current) => [
       ...current,
       newMessage("user", message),
       newMessage("assistant", response),
-      ...(!activeTab?.platform
-        ? [newMessage("tool", "Browser Use paused: open an X, LinkedIn, or Reddit page, then ask me again.")]
+      ...(!browserUseEnabled || !activeTab?.platform
+        ? [
+            newMessage(
+              "tool",
+              browserUseEnabled
+                ? "Browser Use paused: open an X, LinkedIn, or Reddit page, then ask me again."
+                : "Browser Use is off for this chat.",
+            ),
+          ]
         : []),
     ])
     setComposer("")
-    setResearchRequest(request)
-    setResearchTab(activeTab)
+    setResearchRequest(browserUseEnabled ? request : null)
+    setResearchTab(browserUseEnabled ? activeTab : null)
     setProgress(null)
     setTrace([])
     setFindings([])
-    if (activeTab?.platform) collect.mutate({ request, tab: activeTab, provider })
+    if (browserUseEnabled && activeTab?.platform) collect.mutate({ request, tab: activeTab, provider })
   }
 
   const submit = () => submitMessage(composer)
@@ -785,7 +1001,7 @@ ${suggestion.reply}
         threadId: activeChatId,
         message,
         displayMessage: "Rewrite the suggested reply",
-        tab: activeTab,
+        tab: browserUseEnabled ? activeTab : null,
       })
       return
     }
@@ -793,8 +1009,9 @@ ${suggestion.reply}
     chat.mutate({
       message,
       displayMessage: "Rewrite the suggested reply",
-      tab: activeTab,
+      tab: browserUseEnabled ? activeTab : null,
       provider,
+      browserUseEnabled,
     })
   }
 
@@ -804,7 +1021,9 @@ ${suggestion.reply}
     collect.error ??
     interruptCodexChat.error ??
     selectCodexChat.error ??
+    setCodexChatBrowserAccess.error ??
     newCodexChat.error ??
+    deleteCodexChat.error ??
     review.error ??
     chatStateError
   const anyCodexChatRunning =
@@ -844,7 +1063,10 @@ ${suggestion.reply}
                   className={provider === candidate ? "active" : ""}
                   disabled={unavailable || chat.isPending || anyCodexChatRunning}
                   key={candidate}
-                  onClick={() => setProvider(candidate)}
+                  onClick={() => {
+                    setProvider(candidate)
+                    setDeleteConfirmationThreadId(null)
+                  }}
                 >
                   {candidate}
                 </button>
@@ -855,11 +1077,31 @@ ${suggestion.reply}
             className="chat-new-button"
             type="button"
             aria-label="New Codex chat"
-            disabled={newCodexChat.isPending || selectCodexChat.isPending}
+            disabled={newCodexChat.isPending || selectCodexChat.isPending || deleteCodexChat.isPending}
             onClick={() => newCodexChat.mutate()}
           >
             {newCodexChat.isPending ? <LoaderCircle size={13} /> : <Plus size={13} />}
           </button>
+          {provider === "codex" && (
+            <button
+              className="chat-new-button chat-delete-button"
+              type="button"
+              aria-label="Delete selected Codex chat"
+              disabled={
+                !activeCodexChat ||
+                selectedCodexChatRunning ||
+                newCodexChat.isPending ||
+                selectCodexChat.isPending ||
+                deleteCodexChat.isPending
+              }
+              title={
+                selectedCodexChatRunning ? "Stop this chat before deleting it" : "Delete the selected chat"
+              }
+              onClick={() => setDeleteConfirmationThreadId(activeChatId)}
+            >
+              {deleteCodexChat.isPending ? <LoaderCircle size={13} /> : <Trash2 size={13} />}
+            </button>
+          )}
         </div>
       </header>
 
@@ -881,6 +1123,26 @@ ${suggestion.reply}
             </button>
           ))}
         </nav>
+      )}
+
+      {provider === "codex" && deleteConfirmationThreadId === activeChatId && activeCodexChat && (
+        <div className="chat-delete-confirmation" role="alert">
+          <span>Delete “{activeCodexChat.title}” and its transcript? Other chats and browser data stay.</span>
+          <div>
+            <button type="button" onClick={() => setDeleteConfirmationThreadId(null)}>
+              Cancel
+            </button>
+            <button
+              className="danger"
+              type="button"
+              aria-label="Confirm delete chat"
+              disabled={deleteCodexChat.isPending}
+              onClick={() => deleteCodexChat.mutate(activeChatId)}
+            >
+              Delete chat
+            </button>
+          </div>
+        </div>
       )}
 
       <div className="founder-chat-messages" aria-live="polite">
@@ -1081,15 +1343,31 @@ ${suggestion.reply}
 
       <div className="founder-chat-addons" aria-label="Chat add-ons">
         <button
-          className="active"
+          type="button"
+          className={browserUseEnabled ? "active" : ""}
+          aria-label="Browser Use for this chat"
+          aria-pressed={browserUseEnabled}
+          disabled={chatPending || collect.isPending || setCodexChatBrowserAccess.isPending}
+          title={
+            chatPending || collect.isPending
+              ? "Stop the current work before changing Browser Use"
+              : browserUseEnabled
+                ? "Turn off browser access for this chat"
+                : "Turn on browser access for this chat"
+          }
           onClick={() => {
-            if (!composer) setComposer("Research this page for ICP pains, goals, and exact customer language")
+            const enabled = !browserUseEnabled
+            if (provider === "codex") {
+              setCodexChatBrowserAccess.mutate({ threadId: activeChatId, enabled })
+            } else {
+              updateBrowserAccessState(browserPermissionKey, enabled)
+            }
           }}
         >
           <FlaskConical size={13} /> Browser Use
-          <span>chat callable</span>
+          <span>{browserUseEnabled ? "on" : "off"}</span>
         </button>
-        <button onClick={() => setHistoryOpen((value) => !value)}>
+        <button type="button" onClick={() => setHistoryOpen((value) => !value)}>
           <Archive size={13} /> History
         </button>
       </div>
@@ -1147,7 +1425,7 @@ ${suggestion.reply}
         </Button>
       </form>
       <p className="founder-chat-footnote">
-        <Sparkles size={11} /> Codex keeps every chat alive. Each one can use the open browser tab; typing,
+        <Sparkles size={11} /> Each chat works independently. Browser Use is controlled per chat; typing,
         publishing, and sending always require you.
       </p>
     </section>

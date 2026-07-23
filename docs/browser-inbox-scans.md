@@ -18,7 +18,7 @@ Goalbar can import conversation-list previews from X, Reddit, and LinkedIn witho
 - Goalbar may navigate an existing local platform tab to its messages page. It never creates a platform account, enters credentials, or bypasses a login or verification challenge.
 - A scan stores the platform, stable row identifier where available, display name, preview, unread marker, timestamp, and same-platform conversation link.
 - Repeated scans update existing rows instead of creating duplicates.
-- Placeholder LinkedIn routes such as links ending in `/undefined/` are rejected. When LinkedIn does not expose a trustworthy per-thread URL, Goalbar opens the signed-in messaging inbox instead of presenting a false deep link.
+- Placeholder LinkedIn routes such as links ending in `/undefined/` are rejected. When a conversation row does not expose a trustworthy URL, the user-triggered scan selects that row and records the resulting deep link only after the visible thread identity matches the row. If it cannot confirm the match, Goalbar keeps the signed-in messaging inbox URL instead of presenting a false deep link.
 - Conversation-list HTML is undocumented and can change. A completed initial scan means Goalbar reached the oldest conversation row that the website exposed to the local webview; it does not guarantee complete server-side history or import every message inside each thread.
 
 For a complete account record, use the platform's official archive import. Browser inbox scanning is the live conversation-index path; official archives remain the completeness path for historical message content.

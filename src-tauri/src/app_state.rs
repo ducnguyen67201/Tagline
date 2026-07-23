@@ -8,6 +8,7 @@ use crate::adapters::platform::oauth::OAuthManager;
 use crate::browser::BrowserManager;
 use crate::conductor::runner::Conductor;
 use crate::db::Database;
+use crate::db::repositories::codex_chat::CodexChatSettingsRepository;
 use crate::error::AppResult;
 use crate::secrets::{OsSecretStore, SecretStore};
 use crate::services::history::HistorySelectionManager;
@@ -32,11 +33,15 @@ impl AppState {
         let database = Database::open(path).await?;
         let agents = AgentRegistry::default();
         let browser = BrowserManager::default();
+        let codex_chat = CodexChatManager::new(
+            browser.clone(),
+            CodexChatSettingsRepository::new(database.pool().clone()),
+        );
         Ok(Self {
             database,
             conductor: Conductor::new(agents.clone()),
             agents,
-            codex_chat: CodexChatManager::new(browser.clone()),
+            codex_chat,
             platforms: PlatformRegistry::default(),
             oauth: OAuthManager::default(),
             browser,
@@ -51,11 +56,15 @@ impl AppState {
         let database = Database::in_memory().await?;
         let agents = AgentRegistry::default();
         let browser = BrowserManager::default();
+        let codex_chat = CodexChatManager::new(
+            browser.clone(),
+            CodexChatSettingsRepository::new(database.pool().clone()),
+        );
         Ok(Self {
             database,
             conductor: Conductor::new(agents.clone()),
             agents,
-            codex_chat: CodexChatManager::new(browser.clone()),
+            codex_chat,
             platforms: PlatformRegistry::default(),
             oauth: OAuthManager::default(),
             browser,

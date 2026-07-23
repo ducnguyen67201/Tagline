@@ -30,7 +30,10 @@ describe("BrowserPage preview mode", () => {
     expect(screen.getByRole("button", { name: /open x/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /open linkedin/i })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /open reddit/i })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: /browser use chat callable/i })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Browser Use for this chat" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    )
     expect(screen.queryByRole("region", { name: "Local agent terminals" })).not.toBeInTheDocument()
     expect(screen.queryByText("Research add-on requested")).not.toBeInTheDocument()
   })

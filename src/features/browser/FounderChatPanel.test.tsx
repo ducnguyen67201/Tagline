@@ -31,13 +31,27 @@ vi.mock("@tauri-apps/api/event", () => ({
 }))
 
 import { FounderChatPanel } from "./FounderChatPanel"
+import type { BrowserTab } from "@/schemas/browser"
 
-function renderChat() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+const activeBrowserTab: BrowserTab = {
+  id: "7b51a3d8-ec3b-4bb2-b45d-1d4d1b67f34a",
+  webviewLabel: "browser-x",
+  currentUrl: "https://x.com/home",
+  title: "Home / X",
+  loadState: "loaded",
+  platform: "x",
+  active: true,
+  createdAt: "2026-07-23T20:00:00.000Z",
+}
+
+function renderChat(
+  activeTab: BrowserTab | null = null,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   return render(
     <QueryClientProvider client={client}>
       <FounderChatPanel
-        activeTab={null}
+        activeTab={activeTab}
         onNavigate={() => undefined}
         onPrepareReply={() =>
           Promise.resolve({
@@ -57,6 +71,7 @@ describe("FounderChatPanel persistence", () => {
     mocks.invokeValidated.mockReset()
     mocks.listen.mockReset()
     mocks.listen.mockResolvedValue(() => undefined)
+    const browserAccessByThreadId = new Map<string, boolean>()
     mocks.invokeOutput.mockImplementation((command: string) => {
       if (command === "list_codex_chats") {
         return Promise.resolve({
@@ -84,6 +99,7 @@ describe("FounderChatPanel persistence", () => {
       if (command === "get_codex_chat_state") {
         return Promise.resolve({
           threadId: "thread-1",
+          browserAccessEnabled: browserAccessByThreadId.get("thread-1") ?? true,
           messages: [
             {
               id: "b9d7afe0-1807-4ad9-bf22-2945f0bb9081",
@@ -101,11 +117,18 @@ describe("FounderChatPanel persistence", () => {
       return Promise.resolve(false)
     })
     mocks.invokeValidated.mockImplementation(
-      (command: string, payload: { input?: { threadId?: string } }) => {
+      (command: string, payload: { input?: { threadId?: string; enabled?: boolean } }) => {
+        if (command === "set_codex_chat_browser_access") {
+          const threadId = payload.input?.threadId ?? "thread-1"
+          const enabled = payload.input?.enabled ?? true
+          browserAccessByThreadId.set(threadId, enabled)
+          return Promise.resolve(enabled)
+        }
         if (command === "select_codex_chat") {
           const threadId = payload.input?.threadId
           return Promise.resolve({
             threadId,
+            browserAccessEnabled: browserAccessByThreadId.get(threadId ?? "") ?? true,
             messages:
               threadId === "thread-3"
                 ? []
@@ -160,6 +183,59 @@ describe("FounderChatPanel persistence", () => {
     expect(mocks.invokeOutput).toHaveBeenCalledWith("get_codex_chat_state", {}, expect.anything())
   })
 
+  it("restores the last visible chat immediately when the browser panel remounts", async () => {
+    const user = userEvent.setup()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const firstMount = renderChat(null, client)
+    expect(await screen.findByText("Find my ICP")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Content plan" }))
+    expect(await screen.findByText("Here is the content plan.")).toBeInTheDocument()
+    firstMount.unmount()
+
+    mocks.invokeOutput.mockClear()
+    mocks.invokeValidated.mockClear()
+    mocks.invokeOutput.mockImplementation((command: string) => {
+      if (command === "list_codex_chats") {
+        return Promise.resolve({
+          activeThreadId: "thread-1",
+          chats: [
+            {
+              threadId: "thread-1",
+              title: "ICP research",
+              preview: "Find my ICP",
+              createdAt: 1,
+              updatedAt: 2,
+              status: "idle",
+            },
+            {
+              threadId: "thread-2",
+              title: "Content plan",
+              preview: "Plan next week",
+              createdAt: 1,
+              updatedAt: 1,
+              status: "idle",
+            },
+          ],
+        })
+      }
+      return new Promise(() => undefined)
+    })
+    mocks.invokeValidated.mockImplementation(() => new Promise(() => undefined))
+    renderChat(null, client)
+
+    expect(screen.getByText("Here is the content plan.")).toBeInTheDocument()
+    expect(screen.queryByText("Find my ICP")).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(mocks.invokeValidated).toHaveBeenCalledWith(
+        "select_codex_chat",
+        { input: { threadId: "thread-2" } },
+        expect.anything(),
+        expect.anything(),
+      ),
+    )
+    expect(screen.getByText("Here is the content plan.")).toBeInTheDocument()
+  })
+
   it("switches between durable Codex chats and restores each transcript", async () => {
     const user = userEvent.setup()
     renderChat()
@@ -177,6 +253,39 @@ describe("FounderChatPanel persistence", () => {
     expect(screen.getByText("Let us inspect the evidence.")).toBeInTheDocument()
   })
 
+  it("shows a previously loaded transcript before a slow chat selection finishes", async () => {
+    const user = userEvent.setup()
+    mocks.invokeValidated.mockImplementation(
+      (command: string, payload: { input?: { threadId?: string } }) => {
+        const threadId = payload.input?.threadId
+        if (command === "select_codex_chat" && threadId === "thread-1") {
+          return new Promise(() => undefined)
+        }
+        if (command === "select_codex_chat") {
+          return Promise.resolve({
+            threadId,
+            browserAccessEnabled: true,
+            messages: [
+              { id: "content-user", role: "user", body: "Plan next week" },
+              { id: "content-assistant", role: "assistant", body: "Here is the content plan." },
+            ],
+          })
+        }
+        return Promise.resolve(false)
+      },
+    )
+    renderChat()
+    expect(await screen.findByText("Find my ICP")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Content plan" }))
+    expect(await screen.findByText("Here is the content plan.")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "ICP research" }))
+
+    expect(screen.getByText("Find my ICP")).toBeInTheDocument()
+    expect(screen.getByText("Let us inspect the evidence.")).toBeInTheDocument()
+    expect(screen.queryByText("Here is the content plan.")).not.toBeInTheDocument()
+  })
+
   it("can switch chats while another Codex turn keeps running", async () => {
     const user = userEvent.setup()
     let finishTurn: ((value: unknown) => void) | undefined
@@ -190,6 +299,7 @@ describe("FounderChatPanel persistence", () => {
         if (command === "select_codex_chat") {
           return Promise.resolve({
             threadId: payload.input?.threadId,
+            browserAccessEnabled: true,
             messages: [
               {
                 id: "content-user",
@@ -272,6 +382,7 @@ describe("FounderChatPanel persistence", () => {
       if (command === "get_codex_chat_state") {
         return Promise.resolve({
           threadId: "thread-1",
+          browserAccessEnabled: true,
           messages: [
             { id: "icp-user", role: "user", body: "Find my ICP" },
             {
@@ -341,6 +452,7 @@ describe("FounderChatPanel persistence", () => {
       if (command === "get_codex_chat_state") {
         return Promise.resolve({
           threadId: "thread-1",
+          browserAccessEnabled: true,
           messages: [{ id: "icp-user", role: "user", body: "Find my ICP" }],
         })
       }
@@ -357,6 +469,7 @@ describe("FounderChatPanel persistence", () => {
         if (command === "select_codex_chat") {
           return Promise.resolve({
             threadId,
+            browserAccessEnabled: true,
             messages: threadId === "thread-1" ? [{ id: "icp-user", role: "user", body: "Find my ICP" }] : [],
           })
         }
@@ -403,5 +516,115 @@ describe("FounderChatPanel persistence", () => {
       turnId: "turn-3",
       reply: "Plan complete",
     })
+  })
+
+  it("keeps Browser Use permission isolated per Codex chat", async () => {
+    const user = userEvent.setup()
+    renderChat(activeBrowserTab)
+    expect(await screen.findByText("Find my ICP")).toBeInTheDocument()
+
+    const browserUse = screen.getByRole("button", { name: "Browser Use for this chat" })
+    expect(browserUse).toHaveAttribute("aria-pressed", "true")
+    await user.click(browserUse)
+    expect(browserUse).toHaveAttribute("aria-pressed", "false")
+    expect(mocks.invokeValidated).toHaveBeenCalledWith(
+      "set_codex_chat_browser_access",
+      { input: { threadId: "thread-1", enabled: false } },
+      expect.anything(),
+      expect.anything(),
+    )
+
+    await user.type(screen.getByRole("textbox", { name: "Chat message" }), "Summarize this page")
+    await user.click(screen.getByRole("button", { name: "Send message" }))
+    expect(mocks.invokeValidated).toHaveBeenCalledWith(
+      "send_codex_chat_message",
+      {
+        input: {
+          threadId: "thread-1",
+          message: "Summarize this page",
+          activeTabId: null,
+        },
+      },
+      expect.anything(),
+      expect.anything(),
+    )
+
+    await user.click(screen.getByRole("button", { name: "Content plan" }))
+    expect(browserUse).toHaveAttribute("aria-pressed", "true")
+    await user.click(screen.getByRole("button", { name: "ICP research" }))
+    expect(browserUse).toHaveAttribute("aria-pressed", "false")
+  })
+
+  it("deletes only the selected chat after confirmation", async () => {
+    const user = userEvent.setup()
+    mocks.invokeValidated.mockImplementation(
+      (command: string, payload: { input?: { threadId?: string; enabled?: boolean } }) => {
+        if (command === "set_codex_chat_browser_access") {
+          return Promise.resolve(payload.input?.enabled ?? true)
+        }
+        if (command === "select_codex_chat") {
+          return Promise.resolve({
+            threadId: payload.input?.threadId,
+            browserAccessEnabled: true,
+            messages: [
+              { id: "content-user", role: "user", body: "Plan next week" },
+              { id: "content-assistant", role: "assistant", body: "Here is the content plan." },
+            ],
+          })
+        }
+        if (command === "delete_codex_chat") {
+          return Promise.resolve({
+            deletedThreadId: "thread-2",
+            collection: {
+              activeThreadId: "thread-1",
+              chats: [
+                {
+                  threadId: "thread-1",
+                  title: "ICP research",
+                  preview: "Find my ICP",
+                  createdAt: 1,
+                  updatedAt: 2,
+                  status: "idle",
+                },
+              ],
+            },
+            activeChat: {
+              threadId: "thread-1",
+              browserAccessEnabled: false,
+              messages: [
+                { id: "icp-user", role: "user", body: "Find my ICP" },
+                {
+                  id: "icp-assistant",
+                  role: "assistant",
+                  body: "Let us inspect the evidence.",
+                },
+              ],
+            },
+          })
+        }
+        return Promise.resolve(false)
+      },
+    )
+    renderChat()
+    expect(await screen.findByText("Find my ICP")).toBeInTheDocument()
+    const browserUse = screen.getByRole("button", { name: "Browser Use for this chat" })
+    await user.click(browserUse)
+    expect(browserUse).toHaveAttribute("aria-pressed", "false")
+    await user.click(screen.getByRole("button", { name: "Content plan" }))
+    expect(await screen.findByText("Here is the content plan.")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Delete selected Codex chat" }))
+    expect(screen.getByText(/delete “Content plan” and its transcript/i)).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Confirm delete chat" }))
+
+    expect(mocks.invokeValidated).toHaveBeenCalledWith(
+      "delete_codex_chat",
+      { input: { threadId: "thread-2" } },
+      expect.anything(),
+      expect.anything(),
+    )
+    expect(screen.queryByRole("button", { name: "Content plan" })).not.toBeInTheDocument()
+    expect(await screen.findByText("Let us inspect the evidence.")).toBeInTheDocument()
+    expect(browserUse).toHaveAttribute("aria-pressed", "false")
   })
 })

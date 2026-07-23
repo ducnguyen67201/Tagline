@@ -4,7 +4,7 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::adapters::agent::app_server::{
-    CodexChatCollection, CodexChatState, CodexChatTurnResult,
+    CodexChatCollection, CodexChatDeletionResult, CodexChatState, CodexChatTurnResult,
 };
 use crate::adapters::agent::{AgentResult, AgentStatus};
 use crate::app_state::AppState;
@@ -38,6 +38,19 @@ pub struct SelectCodexChatInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InterruptCodexChatInput {
     pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteCodexChatInput {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCodexChatBrowserAccessInput {
+    pub thread_id: String,
+    pub enabled: bool,
 }
 
 #[tauri::command]
@@ -152,6 +165,38 @@ pub async fn new_codex_chat(
     state
         .codex_chat
         .new_thread(&app)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn delete_codex_chat(
+    input: DeleteCodexChatInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CodexChatDeletionResult, CommandError> {
+    let thread_id = Uuid::parse_str(&input.thread_id)
+        .map_err(|error| CommandError::from(AppError::Validation(error.to_string())))?
+        .to_string();
+    state
+        .codex_chat
+        .delete_thread(&app, &thread_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_codex_chat_browser_access(
+    input: SetCodexChatBrowserAccessInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, CommandError> {
+    let thread_id = Uuid::parse_str(&input.thread_id)
+        .map_err(|error| CommandError::from(AppError::Validation(error.to_string())))?
+        .to_string();
+    state
+        .codex_chat
+        .set_browser_access(&app, &thread_id, input.enabled)
         .await
         .map_err(CommandError::from)
 }

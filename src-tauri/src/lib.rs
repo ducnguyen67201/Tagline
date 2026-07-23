@@ -46,6 +46,8 @@ pub fn run() {
             commands::agents::select_codex_chat,
             commands::agents::interrupt_codex_chat,
             commands::agents::new_codex_chat,
+            commands::agents::delete_codex_chat,
+            commands::agents::set_codex_chat_browser_access,
             commands::agents::cancel_job,
             commands::onboarding::save_founder_profile,
             commands::onboarding::update_founder_profile,
